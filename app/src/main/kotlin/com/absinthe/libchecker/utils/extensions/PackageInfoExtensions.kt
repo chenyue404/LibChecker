@@ -7,11 +7,11 @@ import android.content.pm.PackageInfoHidden
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
-import androidx.annotation.RequiresApi
 import androidx.collection.arrayMapOf
 import androidx.core.content.pm.PackageInfoCompat
 import com.absinthe.libchecker.R
 import com.absinthe.libchecker.app.SystemServices
+import com.absinthe.libchecker.compat.IZipFile
 import com.absinthe.libchecker.compat.ZipFileCompat
 import com.absinthe.libchecker.constant.Constants.ARMV5
 import com.absinthe.libchecker.constant.Constants.ARMV5_STRING
@@ -37,26 +37,27 @@ import com.absinthe.libchecker.constant.Constants.X86_64
 import com.absinthe.libchecker.constant.Constants.X86_64_STRING
 import com.absinthe.libchecker.constant.Constants.X86_STRING
 import com.absinthe.libchecker.constant.GlobalFeatures
+import com.absinthe.libchecker.constant.GlobalValues
 import com.absinthe.libchecker.database.entity.Features
-import com.absinthe.libchecker.features.applist.detail.bean.KotlinToolingMetadata
-import com.absinthe.libchecker.features.statistics.bean.LibStringItem
+import com.absinthe.libchecker.domain.app.buildmetadata.DATA_BINDING_VERSION_ENTRIES
+import com.absinthe.libchecker.domain.app.buildmetadata.KotlinBuildMetadataDetector
+import com.absinthe.libchecker.domain.app.detail.model.LibStringItem
 import com.absinthe.libchecker.utils.FileUtils
 import com.absinthe.libchecker.utils.OsUtils
 import com.absinthe.libchecker.utils.PackageUtils
-import com.absinthe.libchecker.utils.fromJson
+import com.absinthe.libchecker.utils.ShizukuManager
+import com.absinthe.libchecker.utils.apk.ApkSignatureSchemeDetector
 import com.absinthe.libchecker.utils.manifest.HiddenPermissionsReader
 import com.absinthe.libchecker.utils.manifest.ManifestReader
-import com.android.apksig.ApkVerifier
 import dev.rikka.tools.refine.Refine
 import hidden.DexFileHidden
 import java.io.File
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.text.DateFormat
 import java.util.Properties
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okio.buffer
 import okio.source
-import rikka.material.app.LocaleDelegate
 import timber.log.Timber
 
 /**
@@ -142,7 +143,9 @@ fun PackageInfo.getStatefulPermissionsList(): List<Pair<String, Boolean>> {
   }
 
   if (flags?.size != requestedPermissions?.size) {
-    return requestedPermissions?.map { it to true }?.toMutableList()?.apply {
+    return requestedPermissions?.mapNotNull { permission ->
+      permission?.let { it to true }
+    }?.toMutableList()?.apply {
       if (hidden.isNotEmpty()) {
         hidden.forEach { (p, v) ->
           add("$p (maxSdkVersion: $v)" to false)
@@ -151,8 +154,10 @@ fun PackageInfo.getStatefulPermissionsList(): List<Pair<String, Boolean>> {
     } ?: emptyList()
   }
 
-  return requestedPermissions?.mapIndexed { index, s ->
-    s to ((flags?.get(index) ?: 0) and PackageInfo.REQUESTED_PERMISSION_GRANTED != 0)
+  return requestedPermissions?.mapIndexedNotNull { index, permission ->
+    permission?.let {
+      it to ((flags?.get(index) ?: 0) and PackageInfo.REQUESTED_PERMISSION_GRANTED != 0)
+    }
   }?.toMutableList()?.apply {
     if (hidden.isNotEmpty()) {
       hidden.forEach { (p, v) ->
@@ -170,67 +175,48 @@ fun PackageInfo.isSplitsApk(): Boolean {
   return !applicationInfo?.splitSourceDirs.isNullOrEmpty()
 }
 
-/**
- * Check if an app uses Kotlin language
- * @return true if it uses Kotlin language
- */
-fun PackageInfo.isKotlinUsed(): Boolean {
-  return runCatching {
-    val file = File(applicationInfo!!.sourceDir)
+private fun hasKotlinArchiveEvidence(zipFile: IZipFile, checkCancelled: () -> Unit): Boolean = zipFile.getEntry("kotlin-tooling-metadata.json") != null ||
+  zipFile.getEntry("kotlin/kotlin.kotlin_builtins") != null ||
+  zipFile.getEntry("META-INF/services/kotlinx.coroutines.CoroutineExceptionHandler") != null ||
+  zipFile.getEntry("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory") != null ||
+  KotlinBuildMetadataDetector.hasKotlinModuleMetadata(zipFile, checkCancelled)
 
-    ZipFileCompat(file).use {
-      it.getEntry("kotlin-tooling-metadata.json") != null ||
-        it.getEntry("kotlin/kotlin.kotlin_builtins") != null ||
-        it.getEntry("META-INF/services/kotlinx.coroutines.CoroutineExceptionHandler") != null ||
-        it.getEntry("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory") != null ||
-        PackageUtils.isKotlinUsedInClassDex(file)
-    }
-  }.getOrDefault(false)
+private fun InputStream.cancellable(checkCancelled: () -> Unit): InputStream = object : FilterInputStream(this) {
+  override fun read(): Int {
+    checkCancelled()
+    return super.read()
+  }
+
+  override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+    checkCancelled()
+    return `in`.read(buffer, offset, minOf(length, DEFAULT_BUFFER_SIZE))
+  }
 }
 
 private const val AGP_KEYWORD = "androidGradlePluginVersion"
 private const val AGP_KEYWORD2 = "Created-By: Android Gradle "
 
-/**
- * Get Android Gradle Plugin version of an app
- * @return Android Gradle Plugin version or null if not found
- */
-fun PackageInfo.getAGPVersion(): String? {
-  runCatching {
-    ZipFileCompat(File(applicationInfo!!.sourceDir)).use { zipFile ->
-      zipFile.getEntry("META-INF/com/android/build/gradle/app-metadata.properties")?.let { ze ->
-        Properties().apply {
-          load(zipFile.getInputStream(ze))
-          getProperty(AGP_KEYWORD)?.let {
-            return it
-          }
-        }
-      }
-      zipFile.getEntry("META-INF/MANIFEST.MF")?.let { ze ->
-        zipFile.getInputStream(ze).source().buffer().use {
-          while (true) {
-            it.readUtf8Line()?.let { line ->
-              if (line.startsWith(AGP_KEYWORD2)) {
-                return line.removePrefix(AGP_KEYWORD2)
-              }
-            } ?: break
-          }
-        }
-      }
-      arrayOf(
-        "META-INF/androidx.databinding_viewbinding.version",
-        "META-INF/androidx.databinding_databindingKtx.version",
-        "META-INF/androidx.databinding_library.version"
-      ).forEach { entry ->
-        zipFile.getEntry(entry)?.let { ze ->
-          zipFile.getInputStream(ze).source().buffer().use { bs ->
-            return bs.readUtf8Line().takeIf { it?.isNotBlank() == true }
-          }
-        }
+private fun readAGPVersion(zipFile: IZipFile, checkCancelled: () -> Unit): String? {
+  zipFile.getEntry("META-INF/com/android/build/gradle/app-metadata.properties")?.let { ze ->
+    Properties().apply { zipFile.getInputStream(ze).cancellable(checkCancelled).use { load(it) } }
+      .getProperty(AGP_KEYWORD)?.let { return it }
+  }
+  zipFile.getEntry("META-INF/MANIFEST.MF")?.let { ze ->
+    zipFile.getInputStream(ze).cancellable(checkCancelled).source().buffer().use {
+      while (true) {
+        checkCancelled()
+        val line = it.readUtf8Line() ?: break
+        if (line.startsWith(AGP_KEYWORD2)) return line.removePrefix(AGP_KEYWORD2)
       }
     }
   }
-
+  DATA_BINDING_VERSION_ENTRIES.forEach { name ->
+    zipFile.getEntry(name)?.let { ze ->
+      zipFile.getInputStream(ze).cancellable(checkCancelled).source().buffer().use { source ->
+        return source.readUtf8Line().takeIf { !it.isNullOrBlank() }
+      }
+    }
+  }
   return null
 }
 
@@ -253,15 +239,6 @@ fun PackageInfo.getPackageSize(includeSplits: Boolean): Long {
     }
   }
   return size
-}
-
-/**
- * Check if an app is a Xposed module
- * @return True if is a Xposed module
- */
-fun PackageInfo.isXposedModule(): Boolean {
-  val metaData = applicationInfo?.metaData ?: return false
-  return metaData.getBoolean("xposedmodule") || metaData.containsKey("xposedminversion")
 }
 
 /**
@@ -302,56 +279,57 @@ fun PackageInfo.isOverlay(): Boolean {
  * Get features of an app
  * @return Features
  */
-fun PackageInfo.getFeatures(): Int {
-  var features = 0
+fun PackageInfo.getFeatures(checkCancelled: () -> Unit = {}): Int {
+  checkCancelled()
   val sourceDir = applicationInfo?.sourceDir ?: return 0
-  val resultList = PackageUtils.findDexClasses(
-    File(sourceDir),
-    listOf(
-      "androidx.compose.*".toClassDefType(),
-      "rx.schedulers.*".toClassDefType(),
-      "io.reactivex.*".toClassDefType(),
-      "io.reactivex.rxjava3.*".toClassDefType(),
-      "io.reactivex.rxjava3.kotlin.*".toClassDefType(),
-      "io.reactivex.rxkotlin".toClassDefType(),
-      "rx.lang.kotlin".toClassDefType(),
-      "io.reactivex.rxjava3.android.*".toClassDefType(),
-      "io.reactivex.android.*".toClassDefType(),
-      "rx.android.*".toClassDefType()
-    )
-  )
-  if (isSplitsApk()) {
-    features = features or Features.SPLIT_APKS
+  return runCatching {
+    ZipFileCompat(File(sourceDir)).use { zipFile -> getFeatures(zipFile, checkCancelled) }
+  }.getOrElse {
+    if (it is java.util.concurrent.CancellationException) throw it
+    getNonArchiveFeatures()
   }
-  if (isKotlinUsed()) {
+}
+
+fun PackageInfo.getFeatures(zipFile: IZipFile, checkCancelled: () -> Unit = {}): Int {
+  checkCancelled()
+  var features = getNonArchiveFeatures()
+  if (applicationInfo?.sourceDir == null) return features
+  val kotlinEvidence = hasKotlinArchiveEvidence(zipFile, checkCancelled)
+  val composeEvidence = isUseJetpackCompose(zipFile, null, checkCancelled)
+  val patterns = buildList {
+    if (!composeEvidence) add(COMPOSE_CLASS_PATTERN)
+    if (!kotlinEvidence) {
+      add(KOTLIN_CLASS_PATTERN)
+      add(KOTLINX_CLASS_PATTERN)
+    }
+  }
+  checkCancelled()
+  val resultList = PackageUtils.findDexClasses(zipFile, patterns, checkCancelled = checkCancelled)
+  if (
+    kotlinEvidence || resultList.any { it == KOTLIN_CLASS_PATTERN || it == KOTLINX_CLASS_PATTERN } ||
+    PackageUtils.hasKotlinRuntimeEvidenceInClassDex(zipFile, checkCancelled)
+  ) {
     features = features or Features.KOTLIN_USED
   }
-  if (getAGPVersion()?.isNotBlank() == true) {
-    features = features or Features.AGP
-  }
-  if (isXposedModule()) {
-    features = features or Features.XPOSED_MODULE
-  }
-  if (isPlayAppSigning()) {
-    features = features or Features.PLAY_SIGNING
-  }
-  if (isPWA()) {
-    features = features or Features.PWA
-  }
-  if (isUseJetpackCompose(resultList)) {
-    features = features or Features.JETPACK_COMPOSE
-  }
-  if (isRxJavaUsed(resultList)) {
-    features = features or Features.RX_JAVA
-  }
-  if (isRxKotlinUsed(resultList)) {
-    features = features or Features.RX_KOTLIN
-  }
-  if (isRxAndroidUsed(resultList)) {
-    features = features or Features.RX_ANDROID
-  }
-
+  checkCancelled()
+  if (!readAGPVersion(zipFile, checkCancelled).isNullOrBlank()) features = features or Features.AGP
+  if (zipFile.getEntry("META-INF/xposed/module.prop") != null) features = features or Features.XPOSED_MODULE
+  if (composeEvidence || resultList.contains(COMPOSE_CLASS_PATTERN)) features = features or Features.JETPACK_COMPOSE
   return features
+}
+
+private fun PackageInfo.getNonArchiveFeatures(): Int {
+  var features = 0
+  if (isSplitsApk()) features = features or Features.SPLIT_APKS
+  if (hasXposedModuleMetadata()) features = features or Features.XPOSED_MODULE
+  if (isPlayAppSigning()) features = features or Features.PLAY_SIGNING
+  if (isPWA()) features = features or Features.PWA
+  return features
+}
+
+internal fun PackageInfo.hasXposedModuleMetadata(): Boolean {
+  val metadata = applicationInfo?.metaData ?: return false
+  return metadata.getBoolean("xposedmodule") || metadata.containsKey("xposedminversion")
 }
 
 /**
@@ -359,271 +337,28 @@ fun PackageInfo.getFeatures(): Int {
  * @return True if is using 32-bit ABI
  */
 fun ApplicationInfo.isUse32BitAbi(): Boolean {
-  runCatching {
-    val demands = ManifestReader.getManifestProperties(File(sourceDir), arrayOf("use32bitAbi"))
-    return demands["use32bitAbi"] as? Boolean == true
-  }.getOrNull() ?: return false
-}
-
-/**
- * Get Kotlin plugin version of an app
- * @return Kotlin plugin version or null if not found
- */
-fun PackageInfo.getKotlinPluginInfo(): Map<String, String?> {
-  val map = mutableMapOf<String, String?>()
-  map["Kotlin"] = null
-  runCatching {
-    ZipFileCompat(applicationInfo!!.sourceDir).use { zip ->
-      val entry = zip.getEntry("kotlin-tooling-metadata.json") ?: return@runCatching null
-      zip.getInputStream(entry).source().buffer().use {
-        val json = it.readUtf8().fromJson<KotlinToolingMetadata>()
-        map["Kotlin"] =
-          json?.buildPluginVersion.takeIf { json?.buildPlugin == "org.jetbrains.kotlin.gradle.plugin.KotlinAndroidPluginWrapper" }
-        if (json?.buildSystem == "Gradle" && json.buildSystemVersion.isNotEmpty()) {
-          map["Gradle"] = json.buildSystemVersion
-        }
-        val kotlinAndroidTarget =
-          json?.projectTargets?.find { target -> target.target == "org.jetbrains.kotlin.gradle.plugin.mpp.KotlinAndroidTarget" }
-        val sourceCompatibility = kotlinAndroidTarget?.extras?.android?.sourceCompatibility
-        if (kotlinAndroidTarget != null && sourceCompatibility.isNullOrEmpty().not()) {
-          map["Java"] = sourceCompatibility
-        }
-      }
-    }
-  }.onFailure {
-    map["Kotlin"] = null
-  }
-  return map
-}
-
-/**
- * Check if an app is using Jetpack Compose
- * @return True if is using Jetpack Compose
- */
-fun PackageInfo.isUseJetpackCompose(foundList: List<String>? = null): Boolean {
-  val file = File(applicationInfo?.sourceDir ?: return false)
-  val foundInMetaInf = runCatching {
-    ZipFileCompat(file).use {
-      it.getZipEntries().asSequence().any { entry ->
-        val fileName = entry.name.substringAfterLast(File.separator)
-        entry.isDirectory.not() &&
-          fileName.startsWith("androidx.compose") &&
-          fileName.endsWith(".version")
-      }
-    }
-  }.getOrDefault(false)
-  if (foundInMetaInf) {
-    return true
-  }
-  if (foundList != null) {
-    return foundList.contains("androidx.compose.*".toClassDefType())
-  }
-  return PackageUtils.findDexClasses(
-    file,
-    listOf("androidx.compose.*".toClassDefType())
-  ).isNotEmpty()
-}
-
-/**
- * Get Jetpack Compose version of an app
- * @return Jetpack Compose version or null if not found
- */
-fun PackageInfo.getJetpackComposeVersion(): String? {
-  runCatching {
-    ZipFileCompat(File(applicationInfo!!.sourceDir)).use { zipFile ->
-      arrayOf(
-        "META-INF/androidx.compose.runtime_runtime.version",
-        "META-INF/androidx.compose.ui_ui.version",
-        "META-INF/androidx.compose.ui_ui-tooling-preview.version",
-        "META-INF/androidx.compose.foundation_foundation.version",
-        "META-INF/androidx.compose.animation_animation.version"
-      ).forEach { entry ->
-        zipFile.getEntry(entry)?.let { ze ->
-          zipFile.getInputStream(ze).source().buffer().use { bs ->
-            return bs.readUtf8Line().takeIf { it?.isNotBlank() == true }
-          }
-        }
-      }
-    }
-  }
-
-  return null
-}
-
-private const val RX_MAJOR_ONE = "1"
-private const val RX_MAJOR_TWO = "2"
-private const val RX_MAJOR_THREE = "3"
-
-/**
- * Check if an app uses RxJava framework
- * @return true if it uses RxJava framework
- */
-fun PackageInfo.isRxJavaUsed(foundList: List<String>? = null): Boolean {
-  val file = File(applicationInfo?.sourceDir ?: return false)
-  val usedInMetaInf = runCatching {
-    ZipFileCompat(file).use {
-      it.getEntry("META-INF/rxjava.properties") != null
-    }
-  }.getOrDefault(false)
-  if (usedInMetaInf) {
-    return true
-  }
-  if (foundList != null) {
-    return foundList.contains("rx.schedulers.*".toClassDefType()) ||
-      foundList.contains("io.reactivex.*".toClassDefType()) ||
-      foundList.contains("io.reactivex.rxjava3.*".toClassDefType())
-  }
-  return PackageUtils.findDexClasses(
-    file,
-    listOf(
-      "rx.schedulers.*".toClassDefType(),
-      "io.reactivex.*".toClassDefType(),
-      "io.reactivex.rxjava3.*".toClassDefType()
-    ),
-    hasAny = true
-  ).isNotEmpty()
-}
-
-private const val REACTIVEX_KEYWORD = "Implementation-Version"
-
-suspend fun PackageInfo.getRxJavaVersion(foundList: List<String>? = null): String? = withContext(Dispatchers.IO) {
-  runCatching {
-    ZipFileCompat(File(applicationInfo!!.sourceDir)).use { zipFile ->
-      zipFile.getEntry("META-INF/rxjava.properties")?.let { ze ->
-        Properties().apply {
-          load(zipFile.getInputStream(ze))
-          getProperty(REACTIVEX_KEYWORD)?.let {
-            return@withContext it
-          }
-        }
-      }
-    }
-    val resultList = foundList ?: PackageUtils.findDexClasses(
-      File(applicationInfo!!.sourceDir),
-      listOf(
-        "rx.schedulers.*".toClassDefType(),
-        "io.reactivex.*".toClassDefType(),
-        "io.reactivex.rxjava3.*".toClassDefType()
-      )
+  return runCatching {
+    val demands = ManifestReader.getManifestProperties(
+      File(sourceDir),
+      arrayOf("use32bitAbi")
     )
-    if (resultList.contains("io.reactivex.rxjava3.*".toClassDefType())) {
-      return@withContext RX_MAJOR_THREE
-    }
-    if (resultList.contains("io.reactivex.*".toClassDefType())) {
-      return@withContext RX_MAJOR_TWO
-    }
-    if (resultList.contains("rx.schedulers.*".toClassDefType())) {
-      return@withContext RX_MAJOR_ONE
-    }
-  }
-  return@withContext null
+    demands["use32bitAbi"] as? Boolean == true
+  }.getOrElse { false }
 }
 
-/**
- * Check if an app uses RxKotlin framework
- * @return true if it uses RxKotlin framework
- */
-fun PackageInfo.isRxKotlinUsed(foundList: List<String>? = null): Boolean {
-  val file = File(applicationInfo?.sourceDir ?: return false)
-  val usedInMetaInf = runCatching {
-    ZipFileCompat(file).use {
-      it.getEntry("META-INF/rxkotlin.properties") != null
-    }
-  }.getOrDefault(false)
-  if (usedInMetaInf) {
-    return true
-  }
-  if (foundList != null) {
-    return foundList.contains("io.reactivex.rxjava3.kotlin.*".toClassDefType()) ||
-      foundList.contains("io.reactivex.rxkotlin".toClassDefType()) ||
-      foundList.contains("rx.lang.kotlin".toClassDefType())
-  }
-  return PackageUtils.findDexClasses(
-    file,
-    listOf(
-      "io.reactivex.rxjava3.kotlin.*".toClassDefType(),
-      "io.reactivex.rxkotlin".toClassDefType(),
-      "rx.lang.kotlin".toClassDefType()
-    ),
-    hasAny = true
-  ).isNotEmpty()
+private fun isUseJetpackCompose(zipFile: IZipFile, foundList: List<String>?, checkCancelled: () -> Unit): Boolean {
+  return zipFile.getZipEntries().asSequence().any { entry ->
+    checkCancelled()
+    val fileName = entry.name.substringAfterLast(File.separator)
+    !entry.isDirectory &&
+      (fileName.startsWith("androidx.compose.ui") || fileName.startsWith("androidx.compose.material")) &&
+      fileName.endsWith(".version")
+  } || foundList?.contains(COMPOSE_CLASS_PATTERN) == true
 }
 
-suspend fun PackageInfo.getRxKotlinVersion(foundList: List<String>? = null): String? = withContext(Dispatchers.IO) {
-  runCatching {
-    val file = File(applicationInfo!!.sourceDir)
-    ZipFileCompat(file).use { zipFile ->
-      zipFile.getEntry("META-INF/rxkotlin.properties")?.let { ze ->
-        Properties().apply {
-          load(zipFile.getInputStream(ze))
-          getProperty(REACTIVEX_KEYWORD)?.let {
-            return@withContext it
-          }
-        }
-      }
-    }
-    val resultList = foundList ?: PackageUtils.findDexClasses(
-      file,
-      listOf(
-        "io.reactivex.rxjava3.kotlin.*".toClassDefType(),
-        "io.reactivex.rxkotlin".toClassDefType(),
-        "rx.lang.kotlin".toClassDefType()
-      )
-    )
-    if (resultList.contains("io.reactivex.rxjava3.kotlin.*".toClassDefType())) {
-      return@withContext RX_MAJOR_THREE
-    }
-    if (resultList.contains("io.reactivex.rxkotlin".toClassDefType())) {
-      return@withContext RX_MAJOR_TWO
-    }
-    if (resultList.contains("rx.lang.kotlin".toClassDefType())) {
-      return@withContext RX_MAJOR_ONE
-    }
-  }
-  return@withContext null
-}
-
-/**
- * Check if an app uses RxAndroid framework
- * @return true if it uses RxAndroid framework
- */
-fun PackageInfo.isRxAndroidUsed(foundList: List<String>? = null): Boolean {
-  if (foundList != null) {
-    return foundList.contains("io.reactivex.rxjava3.android.*".toClassDefType()) ||
-      foundList.contains("io.reactivex.android.*".toClassDefType()) ||
-      foundList.contains("rx.android.*".toClassDefType())
-  }
-  return PackageUtils.findDexClasses(
-    File(applicationInfo?.sourceDir ?: return false),
-    listOf(
-      "io.reactivex.rxjava3.android.*".toClassDefType(),
-      "io.reactivex.android.*".toClassDefType(),
-      "rx.android.*".toClassDefType()
-    ),
-    hasAny = true
-  ).isNotEmpty()
-}
-
-suspend fun PackageInfo.getRxAndroidVersion(foundList: List<String>? = null): String? = withContext(Dispatchers.IO) {
-  val resultList = foundList ?: PackageUtils.findDexClasses(
-    File(applicationInfo?.sourceDir ?: return@withContext null),
-    listOf(
-      "io.reactivex.rxjava3.android.*".toClassDefType(),
-      "io.reactivex.android.*".toClassDefType(),
-      "rx.android.*".toClassDefType()
-    )
-  )
-  if (resultList.contains("io.reactivex.rxjava3.android.*".toClassDefType())) {
-    return@withContext RX_MAJOR_THREE
-  }
-  if (resultList.contains("io.reactivex.android.*".toClassDefType())) {
-    return@withContext RX_MAJOR_TWO
-  }
-  if (resultList.contains("rx.android.*".toClassDefType())) {
-    return@withContext RX_MAJOR_ONE
-  }
-  return@withContext null
-}
+private val COMPOSE_CLASS_PATTERN = "androidx.compose.*".toClassDefType()
+private val KOTLIN_CLASS_PATTERN = "kotlin.*".toClassDefType()
+private val KOTLINX_CLASS_PATTERN = "kotlinx.*".toClassDefType()
 
 /**
  * Get signatures of an app
@@ -631,17 +366,18 @@ suspend fun PackageInfo.getRxAndroidVersion(foundList: List<String>? = null): St
  * @return List of LibStringItem
  */
 fun PackageInfo.getSignatures(context: Context): Sequence<LibStringItem> {
+  val locale = GlobalValues.locale
   val localedContext = context.createConfigurationContext(
     Configuration(context.resources.configuration).apply {
-      setLocale(LocaleDelegate.defaultLocale)
+      setLocale(locale)
     }
   )
   val dateFormat = DateFormat.getDateTimeInstance(
     DateFormat.LONG,
     DateFormat.LONG,
-    LocaleDelegate.defaultLocale
+    locale
   )
-  return if (OsUtils.atLeastP() && signingInfo != null) {
+  val signatureArray = if (OsUtils.atLeastP() && signingInfo != null) {
     if (signingInfo!!.hasMultipleSigners()) {
       signingInfo!!.apkContentsSigners
     } else {
@@ -649,13 +385,15 @@ fun PackageInfo.getSignatures(context: Context): Sequence<LibStringItem> {
     }
   } else {
     @Suppress("DEPRECATION")
-    signatures
-  }.orEmpty().asSequence().map {
-    PackageUtils.describeSignature(localedContext, dateFormat, it, getSignatureSchemes())
+    this.signatures
+  }
+  val signatureSchemes = getSignatureSchemes()
+  return signatureArray.orEmpty().asSequence().map {
+    PackageUtils.describeSignature(localedContext, dateFormat, it, signatureSchemes)
   }
 }
 
-fun PackageInfo.getAppName(): String? = applicationInfo?.loadLabel(SystemServices.packageManager)?.toString()
+fun PackageInfo.getAppName(packageManager: PackageManager): String? = applicationInfo?.loadLabel(packageManager)?.toString()
 
 val PREINSTALLED_TIMESTAMP by lazy {
   // default is 2009-01-01 08:00:00 GMT+8
@@ -668,16 +406,117 @@ fun PackageInfo.isPreinstalled(): Boolean {
   return lastUpdateTime <= PREINSTALLED_TIMESTAMP
 }
 
-@RequiresApi(Build.VERSION_CODES.P)
-fun PackageInfo.getDexFileOptimizationInfo(): DexFileHidden.OptimizationInfo? {
+fun PackageInfo.getDexFileOptimizationInfo(): DexFileOptimizationInfo? {
   val sourceDir = applicationInfo?.sourceDir ?: return null
-  val info = DexFileHidden.getDexFileOptimizationInfo(
-    sourceDir,
-    ABI_TO_INSTRUCTION_SET_MAP[Build.SUPPORTED_ABIS[0]]!!
-  )
-  Timber.d("getDexFileOptimizationInfo: status=${info.status}, reason=${info.reason}")
-  return info
+  return getDexFileOptimizationInfoFromPackageDump(sourceDir)
+    ?: getDexFileOptimizationInfoFromDexFile(sourceDir)
 }
+
+data class DexFileOptimizationInfo(
+  val status: String,
+  val reason: String,
+  val instructionSet: String? = null
+)
+
+private data class DexoptDumpInfo(
+  val instructionSet: String,
+  val status: String,
+  val reason: String,
+  val isPrimaryAbi: Boolean
+)
+
+private fun PackageInfo.getDexFileOptimizationInfoFromPackageDump(sourceDir: String): DexFileOptimizationInfo? {
+  if (!ShizukuManager.requireAvailable()) {
+    return null
+  }
+
+  return runCatching {
+    ShizukuManager.dumpPackageService(arrayOf(packageName))
+  }.onFailure {
+    Timber.w(it, "getDexFileOptimizationInfo: package dump failed")
+  }.getOrNull()?.let { dump ->
+    parseDexoptDump(dump, packageName, sourceDir)
+  }?.also {
+    Timber.d("getDexFileOptimizationInfo: status=${it.status}, reason=${it.reason}, isa=${it.instructionSet}")
+  }
+}
+
+private fun PackageInfo.getDexFileOptimizationInfoFromDexFile(sourceDir: String): DexFileOptimizationInfo? {
+  if (!OsUtils.atLeastP()) {
+    return null
+  }
+  val instructionSet = ABI_TO_INSTRUCTION_SET_MAP[Build.SUPPORTED_ABIS.firstOrNull()] ?: return null
+  return runCatching {
+    val info = DexFileHidden.getDexFileOptimizationInfo(sourceDir, instructionSet)
+    DexFileOptimizationInfo(info.status, info.reason, instructionSet)
+  }.onFailure {
+    Timber.w(it, "getDexFileOptimizationInfo: DexFile fallback failed")
+  }.getOrNull()?.also {
+    Timber.d("getDexFileOptimizationInfo: fallback status=${it.status}, reason=${it.reason}, isa=${it.instructionSet}")
+  }
+}
+
+private fun parseDexoptDump(
+  dump: String,
+  packageName: String,
+  sourceDir: String
+): DexFileOptimizationInfo? {
+  val entries = mutableListOf<DexoptDumpInfo>()
+  var inDexoptState = false
+  var inTargetPackage = false
+  var inTargetPath = false
+
+  for (line in dump.lineSequence()) {
+    val value = line.trim()
+    when {
+      value == "Dexopt state:" -> {
+        inDexoptState = true
+        inTargetPackage = false
+        inTargetPath = false
+      }
+
+      inDexoptState && value == "[$packageName]" -> {
+        inTargetPackage = true
+        inTargetPath = false
+      }
+
+      inTargetPackage && value.startsWith("[") && value.endsWith("]") -> {
+        if (entries.isNotEmpty()) {
+          break
+        }
+        inTargetPackage = false
+        inTargetPath = false
+      }
+
+      inTargetPackage && value.startsWith("path: ") -> {
+        if (entries.isNotEmpty()) {
+          break
+        }
+        inTargetPath = value.removePrefix("path: ").substringBefore(' ') == sourceDir
+      }
+
+      inTargetPackage && inTargetPath -> {
+        val match = DEXOPT_STATUS_PATTERN.matchEntire(value) ?: continue
+        entries += DexoptDumpInfo(
+          instructionSet = match.groupValues[1],
+          status = match.groupValues[2],
+          reason = match.groupValues[3],
+          isPrimaryAbi = match.groupValues[4].contains("[primary-abi]")
+        )
+      }
+    }
+  }
+
+  val preferredInstructionSet = ABI_TO_INSTRUCTION_SET_MAP[Build.SUPPORTED_ABIS.firstOrNull()]
+  val entry = entries.firstOrNull { it.isPrimaryAbi }
+    ?: entries.firstOrNull { it.instructionSet == preferredInstructionSet }
+    ?: entries.firstOrNull()
+  return entry?.let {
+    DexFileOptimizationInfo(it.status, it.reason, it.instructionSet)
+  }
+}
+
+private val DEXOPT_STATUS_PATTERN = Regex("""^(\S+):\s+\[status=([^\]]+)]\s+\[reason=([^\]]+)](.*)$""")
 
 // Keep in sync with `ABI_TO_INSTRUCTION_SET_MAP` in
 // libcore/libart/src/main/java/dalvik/system/VMRuntime.java.
@@ -747,7 +586,6 @@ val ABI_STRING_RES_MAP = arrayMapOf(
 )
 
 const val PAGE_SIZE_16_KB = 0x4000
-const val PAGE_SIZE_4_KB = 0x1000
 
 /**
  *
@@ -767,19 +605,21 @@ fun PackageInfo.is16KBAligned(libs: List<LibStringItem>? = null, isApk: Boolean 
     return false
   }
 
-  val nativeLibs = libs ?: run {
-    val abi = PackageUtils.getAbi(this, isApk = isApk)
-    val abiString = ABI_STRING_MAP[abi % MULTI_ARCH]
-    PackageUtils.getSourceLibs(
-      packageInfo = this,
-      specifiedAbi = abi,
-      parseElf = true
-    )[abiString] ?: emptyList()
-  }
+  val nativeLibs = (
+    libs ?: run {
+      val abi = PackageUtils.getAbi(this, isApk = isApk)
+      val abiString = ABI_STRING_MAP[abi % MULTI_ARCH]
+      PackageUtils.getSourceLibs(
+        packageInfo = this,
+        specifiedAbi = abi,
+        parseElf = true
+      )[abiString] ?: emptyList()
+    }
+    ).filter { it.elfInfo.pageSize > 0 }
 
   return nativeLibs.isNotEmpty() &&
     nativeLibs.all { it.elfInfo.pageSize % PAGE_SIZE_16_KB == 0 } &&
-    nativeLibs.all { it.elfInfo.uncompressedAndNot16KB.not() }
+    nativeLibs.all { it.elfInfo.zipAlignment <= 0L || it.elfInfo.zipAlignment >= PAGE_SIZE_16_KB }
 }
 
 /**
@@ -801,8 +641,7 @@ fun PackageInfo.isUseKMP(foundList: List<String>? = null): Boolean {
     file,
     listOf("org.jetbrains.compose.*".toClassDefType())
   )
-  val foundInDex = realFoundList.contains("org.jetbrains.compose.*".toClassDefType())
-  return foundInDex
+  return realFoundList.contains("org.jetbrains.compose.*".toClassDefType())
 }
 
 fun PackageInfo.isArchivedPackage(): Boolean {
@@ -815,20 +654,26 @@ fun PackageInfo.isArchivedPackage(): Boolean {
  * https://source.android.com/docs/core/architecture/16kb-page-size/16kb-backcompat-option
  */
 fun PackageInfo.isPageSizeCompat(): Boolean {
-  runCatching {
+  return runCatching {
     val demands = ManifestReader.getManifestProperties(
       File(applicationInfo!!.sourceDir),
       arrayOf("pageSizeCompat")
     )
-    return demands["pageSizeCompat"] as? String == "enabled"
-  }.getOrNull() ?: return false
+    demands["pageSizeCompat"] as? String == "enabled"
+  }.getOrElse { false }
 }
 
-fun PackageInfo.getSignatureSchemes(): ApkVerifier.Result? {
+fun PackageInfo.getSignatureSchemes(): List<String> {
+  val sourceDir = applicationInfo?.sourceDir
+  if (sourceDir.isNullOrBlank()) {
+    Timber.w("Failed to get signature schemes for package without sourceDir: $packageName")
+    return emptyList()
+  }
+
   return runCatching {
-    ApkVerifier.Builder(File(applicationInfo!!.sourceDir)).build().verify()
+    ApkSignatureSchemeDetector.detect(File(sourceDir))
   }.getOrElse {
-    Timber.e(it, "Failed to get signature schemes for package: $packageName")
-    null
+    Timber.w(it, "Failed to get signature schemes for package: $packageName")
+    emptyList()
   }
 }

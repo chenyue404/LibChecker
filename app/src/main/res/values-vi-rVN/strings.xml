@@ -41,7 +41,6 @@
   <string name="ref_category_cp">Nhà cung cấp nội dung</string>
   <string name="ref_category_perm">Quyền</string>
   <string name="ref_category_static">Thư viện</string>
-  <string name="ref_category_metadata">Metadata</string>
   <string name="ref_category_package">Gói</string>
   <string name="ref_category_shared_uid">UID dùng chung</string>
   <string name="ref_category_signatures">Chữ ký</string>
@@ -220,13 +219,13 @@
   <string name="snapshot_build_id">ID bản dựng</string>
   <string name="snapshot_build_security_patch">Bản vá bảo mật</string>
   <!--  Dialog  -->
-  <string name="dialog_title_reload_apps">Bạn có chắc chắn tải lại tất cả ứng dụng không?</string>
+  <string name="dialog_title_reload_apps">Tải lại tất cả ứng dụng?</string>
   <string name="dialog_subtitle_reload_apps">Điều này có thể mất một vài giây</string>
   <string name="dialog_title_change_timestamp">Thay đổi nút thời gian</string>
   <string name="dialog_title_keep_previous_snapshot">Chú ý</string>
   <string name="dialog_message_keep_previous_snapshot">Bạn có muốn giữ ảnh chụp nhanh trước đó không?</string>
   <string name="dialog_title_select_to_delete">Chọn một ngày để xóa ảnh chụp nhanh</string>
-  <string name="dialog_title_confirm_to_delete">Bạn có chắc chắn xóa ảnh chụp nhanh này không?</string>
+  <string name="dialog_title_confirm_to_delete">Xóa ảnh chụp nhanh này?</string>
   <string name="btn_keep">Giữ</string>
   <string name="btn_drop">loại bỏ</string>
   <string name="dialog_title_compare_diff_apk">Chú ý</string>
@@ -289,4 +288,5 @@
   <string name="snapshot_menu_hide_no_component_changes">Ẩn những thay đổi không có thành phần</string>
   <string name="snapshot_menu_diff_highlight">Tô sáng khác biệt</string>
   <string name="snapshot_menu_use_iec_units">Sử dụng đơn vị IEC</string>
+  <!-- A11y -->
 </resources>

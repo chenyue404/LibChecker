@@ -1,0 +1,444 @@
+package com.absinthe.libchecker.ui.animator
+
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.drawable.Drawable
+import android.view.View
+import android.view.ViewGroup
+import androidx.interpolator.view.animation.FastOutSlowInInterpolator
+import androidx.recyclerview.widget.DefaultItemAnimator
+import androidx.recyclerview.widget.RecyclerView
+import kotlin.math.ceil
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
+import kotlin.random.Random
+
+class ParticleRemoveItemAnimator : DefaultItemAnimator() {
+
+  private val pendingParticleRemoveItemIds = linkedSetOf<Long>()
+  private val activeParticleDecorations = linkedSetOf<ParticleAnimationDecoration>()
+
+  fun prepareParticleRemovals(itemIds: Collection<Long>) {
+    pendingParticleRemoveItemIds.clear()
+    pendingParticleRemoveItemIds.addAll(itemIds.take(MAX_PARTICLE_REMOVES_PER_BATCH))
+  }
+
+  // The particle effect is remove-only. Add/change animations are left to DefaultItemAnimator.
+  override fun animateRemove(holder: RecyclerView.ViewHolder): Boolean {
+    if (!pendingParticleRemoveItemIds.remove(holder.itemId)) {
+      return super.animateRemove(holder)
+    }
+
+    val itemView = holder.itemView
+    val recyclerView = itemView.parent as? RecyclerView ?: return super.animateRemove(holder)
+    if (itemView.width <= 0 || itemView.height <= 0 || recyclerView.width <= 0 || recyclerView.height <= 0) {
+      return super.animateRemove(holder)
+    }
+
+    val bitmap = itemView.createSnapshotOrNull() ?: return super.animateRemove(holder)
+    cancelActiveDecorations(holder.itemId)
+    dispatchRemoveStarting(holder)
+    val decoration = ParticleAnimationDecoration(
+      host = recyclerView,
+      bitmap = bitmap,
+      originLeft = itemView.left + itemView.translationX,
+      originTop = itemView.top + itemView.translationY,
+      seed = holder.itemId,
+      onStart = {
+        holder.itemView.alpha = 0f
+      },
+      onCleanUp = {
+        activeParticleDecorations.remove(it)
+        resetView(holder.itemView)
+        dispatchRemoveFinished(holder)
+      }
+    )
+    activeParticleDecorations.add(decoration)
+    decoration.start()
+
+    return true
+  }
+
+  override fun endAnimation(item: RecyclerView.ViewHolder) {
+    pendingParticleRemoveItemIds.remove(item.itemId)
+    cancelActiveDecorations(item.itemId)
+    super.endAnimation(item)
+  }
+
+  override fun endAnimations() {
+    pendingParticleRemoveItemIds.clear()
+    cancelActiveDecorations()
+    super.endAnimations()
+  }
+
+  private fun cancelActiveDecorations(itemId: Long? = null) {
+    activeParticleDecorations
+      .filter { itemId == null || it.itemId == itemId }
+      .toList()
+      .forEach { it.cancel() }
+  }
+
+  override fun isRunning(): Boolean {
+    return super.isRunning() || activeParticleDecorations.isNotEmpty()
+  }
+
+  private fun resetView(view: View) {
+    view.alpha = 1f
+    view.translationX = 0f
+    view.translationY = 0f
+    view.translationZ = 0f
+  }
+
+  private class ParticleAnimationDecoration(
+    private val host: ViewGroup,
+    private val bitmap: Bitmap,
+    private val originLeft: Float,
+    private val originTop: Float,
+    seed: Long,
+    private val durationMillis: Long = PARTICLE_DURATION,
+    private val onStart: () -> Unit,
+    private val onCleanUp: (ParticleAnimationDecoration) -> Unit
+  ) : RecyclerView.ItemDecoration(),
+    View.OnAttachStateChangeListener {
+
+    val itemId = seed
+    private val recyclerView = host as? RecyclerView
+    private val density = host.resources.displayMetrics.density
+    private val particles = createParticles(bitmap, density, seed)
+    private val particleVertices = FloatArray(particles.size * PARTICLE_VERTEX_FLOAT_COUNT)
+    private val particleColors = IntArray(particles.size * PARTICLE_VERTEX_COUNT)
+    private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val particlePaint = Paint()
+    private val dst = RectF()
+    private val startHorizontalScrollOffset = recyclerView?.computeHorizontalScrollOffset() ?: 0
+    private val startVerticalScrollOffset = recyclerView?.computeVerticalScrollOffset() ?: 0
+    private var progress = 0f
+    private var animator: ValueAnimator? = null
+    private var cleanedUp = false
+    private var started = false
+    private var decorationAdded = false
+    private val forceCleanUpRunnable = Runnable { cleanUp() }
+    private val overlayDrawable by lazy {
+      object : Drawable() {
+        override fun draw(canvas: Canvas) = drawParticles(canvas)
+        override fun setAlpha(alpha: Int) = Unit
+        override fun setColorFilter(colorFilter: ColorFilter?) = Unit
+
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity() = PixelFormat.TRANSLUCENT
+      }.apply { setBounds(0, 0, host.width, host.height) }
+    }
+
+    fun start() {
+      if (cleanedUp || started) {
+        return
+      }
+      if (recyclerView?.isComputingLayout == true) {
+        host.post { start() }
+        return
+      }
+      started = true
+      if (recyclerView != null) recyclerView.addItemDecoration(this) else host.overlay.add(overlayDrawable)
+      decorationAdded = true
+      onStart()
+      host.addOnAttachStateChangeListener(this)
+      host.postDelayed(forceCleanUpRunnable, durationMillis + FORCE_CLEAN_UP_DELAY)
+      animator = ValueAnimator.ofFloat(0f, 1f).apply {
+        duration = durationMillis
+        interpolator = FastOutSlowInInterpolator()
+        addUpdateListener {
+          progress = it.animatedValue as Float
+          invalidateHost()
+        }
+        addListener(object : AnimatorListenerAdapter() {
+          override fun onAnimationEnd(animation: Animator) {
+            cleanUp()
+          }
+
+          override fun onAnimationCancel(animation: Animator) {
+            cleanUp()
+          }
+        })
+        start()
+      }
+      invalidateHost()
+    }
+
+    private fun invalidateHost() {
+      if (recyclerView != null) recyclerView.invalidateItemDecorations() else overlayDrawable.invalidateSelf()
+      host.postInvalidateOnAnimation()
+    }
+
+    fun cancel() {
+      animator?.cancel() ?: cleanUp()
+    }
+
+    override fun onDrawOver(canvas: Canvas, parent: RecyclerView, state: RecyclerView.State) {
+      drawParticles(canvas)
+    }
+
+    private fun drawParticles(canvas: Canvas) {
+      if (bitmap.isRecycled) {
+        return
+      }
+
+      val drawOriginLeft = originLeft + startHorizontalScrollOffset - (recyclerView?.computeHorizontalScrollOffset() ?: 0)
+      val drawOriginTop = originTop + startVerticalScrollOffset - (recyclerView?.computeVerticalScrollOffset() ?: 0)
+
+      drawSnapshot(canvas, drawOriginLeft, drawOriginTop)
+      var vertexOffset = 0
+      var colorOffset = 0
+      for (particle in particles) {
+        val localProgress = ((progress - particle.delay) * particle.inverseActiveRange).coerceIn(0f, 1f)
+        if (localProgress > 0f) {
+          if (particle.writeAnimatedVertices(
+              localProgress = localProgress,
+              drawOriginLeft = drawOriginLeft,
+              drawOriginTop = drawOriginTop,
+              vertices = particleVertices,
+              vertexOffset = vertexOffset,
+              colors = particleColors,
+              colorOffset = colorOffset
+            )
+          ) {
+            vertexOffset += PARTICLE_VERTEX_FLOAT_COUNT
+            colorOffset += PARTICLE_VERTEX_COUNT
+          }
+        }
+      }
+      if (colorOffset > 0) {
+        canvas.drawVertices(
+          Canvas.VertexMode.TRIANGLES,
+          colorOffset,
+          particleVertices,
+          0,
+          null,
+          0,
+          particleColors,
+          0,
+          null,
+          0,
+          0,
+          particlePaint
+        )
+      }
+    }
+
+    override fun onViewDetachedFromWindow(v: View) {
+      cancel()
+    }
+
+    override fun onViewAttachedToWindow(v: View) = Unit
+
+    private fun drawSnapshot(canvas: Canvas, drawOriginLeft: Float, drawOriginTop: Float) {
+      val fadeProgress = ((progress - SNAPSHOT_FADE_START) / (SNAPSHOT_FADE_END - SNAPSHOT_FADE_START))
+        .coerceIn(0f, 1f)
+      val alpha = ((1f - fadeProgress) * START_ALPHA).roundToInt()
+      if (alpha <= 0) {
+        return
+      }
+
+      bitmapPaint.alpha = alpha
+      val squeeze = 1f - 0.025f * progress
+      val left = drawOriginLeft + bitmap.width * (1f - squeeze) / 2f
+      val right = left + bitmap.width * squeeze
+      dst.set(left, drawOriginTop, right, drawOriginTop + bitmap.height)
+      canvas.drawBitmap(bitmap, null, dst, bitmapPaint)
+    }
+
+    private fun Particle.writeAnimatedVertices(
+      localProgress: Float,
+      drawOriginLeft: Float,
+      drawOriginTop: Float,
+      vertices: FloatArray,
+      vertexOffset: Int,
+      colors: IntArray,
+      colorOffset: Int
+    ): Boolean {
+      val eased = 1f - (1f - localProgress) * (1f - localProgress)
+      val radius = radius * (1f - 0.45f * eased)
+      val centerX = drawOriginLeft + centerX + velocityX * eased + driftX * localProgress * localProgress
+      val centerY = drawOriginTop + centerY + velocityY * eased + gravity * localProgress * localProgress
+      val fadeIn = (localProgress / PARTICLE_FADE_IN_END).coerceIn(0f, 1f)
+      val alpha = (fadeIn * (1f - localProgress) * (1f - localProgress) * START_ALPHA).roundToInt()
+
+      if (alpha <= 0 || radius <= 0f) {
+        return false
+      }
+
+      val left = centerX - radius
+      val top = centerY - radius
+      val right = centerX + radius
+      val bottom = centerY + radius
+      vertices[vertexOffset] = left
+      vertices[vertexOffset + 1] = top
+      vertices[vertexOffset + 2] = right
+      vertices[vertexOffset + 3] = top
+      vertices[vertexOffset + 4] = left
+      vertices[vertexOffset + 5] = bottom
+      vertices[vertexOffset + 6] = right
+      vertices[vertexOffset + 7] = top
+      vertices[vertexOffset + 8] = right
+      vertices[vertexOffset + 9] = bottom
+      vertices[vertexOffset + 10] = left
+      vertices[vertexOffset + 11] = bottom
+
+      val animatedColor = (alpha shl 24) or rgbColor
+      colors[colorOffset] = animatedColor
+      colors[colorOffset + 1] = animatedColor
+      colors[colorOffset + 2] = animatedColor
+      colors[colorOffset + 3] = animatedColor
+      colors[colorOffset + 4] = animatedColor
+      colors[colorOffset + 5] = animatedColor
+      return true
+    }
+
+    private fun cleanUp() {
+      if (cleanedUp) {
+        return
+      }
+      cleanedUp = true
+      host.removeCallbacks(forceCleanUpRunnable)
+      animator?.removeAllUpdateListeners()
+      animator?.removeAllListeners()
+      animator = null
+      host.removeOnAttachStateChangeListener(this)
+      if (decorationAdded) {
+        runCatching {
+          if (recyclerView != null) recyclerView.removeItemDecoration(this) else host.overlay.remove(overlayDrawable)
+        }
+        decorationAdded = false
+      }
+      invalidateHost()
+      onCleanUp(this)
+      recycleBitmap()
+    }
+
+    private fun recycleBitmap() {
+      if (!bitmap.isRecycled) {
+        bitmap.recycle()
+      }
+    }
+  }
+
+  private data class Particle(
+    val centerX: Float,
+    val centerY: Float,
+    val radius: Float,
+    val rgbColor: Int,
+    val velocityX: Float,
+    val velocityY: Float,
+    val driftX: Float,
+    val gravity: Float,
+    val delay: Float,
+    val inverseActiveRange: Float
+  )
+
+  companion object {
+    /** Use the same removal particles for a row outside a RecyclerView. */
+    fun animateRemoval(view: View, host: ViewGroup, durationMillis: Long = PARTICLE_DURATION) {
+      if (!view.isAttachedToWindow || view.width <= 0 || view.height <= 0) return
+      val bitmap = view.createSnapshotOrNull() ?: return
+      val bounds = Rect(0, 0, view.width, view.height)
+      host.offsetDescendantRectToMyCoords(view, bounds)
+      ParticleAnimationDecoration(
+        host = host,
+        bitmap = bitmap,
+        originLeft = bounds.left.toFloat(),
+        originTop = bounds.top.toFloat(),
+        seed = view.hashCode().toLong(),
+        durationMillis = durationMillis,
+        onStart = { view.alpha = 0f },
+        onCleanUp = { view.alpha = 1f }
+      ).start()
+    }
+
+    private fun View.createSnapshotOrNull(): Bitmap? = runCatching {
+      Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { draw(Canvas(it)) }
+    }.getOrNull()
+
+    private const val MAX_PARTICLE_REMOVES_PER_BATCH = 4
+    private const val PARTICLE_DURATION = 2200L
+    private const val PARTICLE_COUNT_TARGET = 2800
+    private const val START_ALPHA = 255
+    private const val SNAPSHOT_FADE_START = 0.02f
+    private const val SNAPSHOT_FADE_END = 0.24f
+    private const val PARTICLE_FADE_IN_END = 0.08f
+    private const val FORCE_CLEAN_UP_DELAY = 300L
+    private const val PARTICLE_VERTEX_COUNT = 6
+    private const val PARTICLE_VERTEX_FLOAT_COUNT = PARTICLE_VERTEX_COUNT * 2
+
+    private fun createParticles(bitmap: Bitmap, density: Float, seed: Long): List<Particle> {
+      val random = Random(seed.toInt())
+      val minCellSize = (1f * density).roundToInt().coerceAtLeast(1)
+      val maxCellSize = (3f * density).roundToInt().coerceAtLeast(minCellSize)
+      val areaBasedCellSize = sqrt(bitmap.width * bitmap.height / PARTICLE_COUNT_TARGET.toFloat())
+        .roundToInt()
+        .coerceIn(minCellSize, maxCellSize)
+      val columns = ceil(bitmap.width / areaBasedCellSize.toFloat()).roundToInt().coerceAtLeast(1)
+      val rows = ceil(bitmap.height / areaBasedCellSize.toFloat()).roundToInt().coerceAtLeast(1)
+      val cellWidth = ceil(bitmap.width / columns.toFloat()).roundToInt().coerceAtLeast(1)
+      val cellHeight = ceil(bitmap.height / rows.toFloat()).roundToInt().coerceAtLeast(1)
+      val particles = ArrayList<Particle>(columns * rows)
+
+      for (row in 0 until rows) {
+        for (column in 0 until columns) {
+          val left = column * cellWidth
+          val top = row * cellHeight
+          val right = (left + cellWidth).coerceAtMost(bitmap.width)
+          val bottom = (top + cellHeight).coerceAtMost(bitmap.height)
+          if (left >= right || top >= bottom) {
+            continue
+          }
+
+          val sampleX = ((left + right) / 2).coerceIn(0, bitmap.width - 1)
+          val sampleY = ((top + bottom) / 2).coerceIn(0, bitmap.height - 1)
+          val color = bitmap.getPixel(sampleX, sampleY)
+          if (Color.alpha(color) < 16) {
+            continue
+          }
+
+          val horizontalProgress = sampleX / bitmap.width.toFloat()
+          val verticalProgress = sampleY / bitmap.height.toFloat()
+          val outward = horizontalProgress - 0.5f
+          val velocityX = (outward * 96f + random.nextFloatIn(-34f, 34f)) * density
+          val velocityY = (random.nextFloatIn(-36f, 18f) - verticalProgress * 18f) * density
+          val driftX = random.nextFloatIn(-22f, 22f) * density
+          val gravity = random.nextFloatIn(42f, 76f) * density
+          val delay = (horizontalProgress * 0.16f + verticalProgress * 0.08f + random.nextFloatIn(0f, 0.08f))
+            .coerceIn(0f, 0.32f)
+
+          particles += Particle(
+            centerX = (left + right) / 2f,
+            centerY = (top + bottom) / 2f,
+            radius = random.nextFloatIn(
+              (cellWidth.coerceAtMost(cellHeight) * 0.28f).coerceAtLeast(1f),
+              (cellWidth.coerceAtMost(cellHeight) * 0.5f).coerceAtLeast(1f)
+            ),
+            rgbColor = color and 0x00ffffff,
+            velocityX = velocityX,
+            velocityY = velocityY,
+            driftX = driftX,
+            gravity = gravity,
+            delay = delay,
+            inverseActiveRange = 1f / (1f - delay)
+          )
+        }
+      }
+      return particles
+    }
+
+    private fun Random.nextFloatIn(from: Float, until: Float): Float {
+      return from + nextFloat() * (until - from)
+    }
+  }
+}

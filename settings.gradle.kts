@@ -22,13 +22,17 @@ dependencyResolutionManagement {
         includeGroupByRegex(".*android.*")
       }
     }
+    maven("https://jitpack.io") {
+      content {
+        includeGroupByRegex("com.github.*")
+      }
+    }
     mavenCentral()
-    maven("https://jitpack.io")
   }
 }
 
 plugins {
-  id("com.gradle.develocity") version "4.2.1"
+  id("com.gradle.develocity") version "4.5.0"
   id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
@@ -44,7 +48,8 @@ develocity {
 
 enableFeaturePreview("STABLE_CONFIGURATION_CACHE")
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
+enableFeaturePreview("NO_IMPLICIT_LOOKUP_IN_PARENT_PROJECTS")
 
-include(":app", ":hidden-api")
+include(":app", ":compat", ":hidden-api", ":macrobenchmark")
 
 rootProject.name = "LibChecker"

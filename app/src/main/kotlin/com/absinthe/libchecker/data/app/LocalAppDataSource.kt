@@ -1,33 +1,95 @@
 package com.absinthe.libchecker.data.app
 
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import com.absinthe.libchecker.app.SystemServices
 import com.absinthe.libchecker.compat.PackageManagerCompat
+import com.absinthe.libchecker.domain.app.model.PackageChangeState
 import com.absinthe.libchecker.utils.OsUtils
+import com.absinthe.libchecker.utils.PackageUtils
 import com.absinthe.libchecker.utils.extensions.isArchivedPackage
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import timber.log.Timber
 
-object LocalAppDataSource : AppDataSource {
+class LocalAppDataSource : AppDataSource {
 
-  var apexPackageSet: Set<String> = emptySet()
-    private set
+  private val applicationsLock = ReentrantReadWriteLock()
+  private val applicationMap: MutableMap<String, PackageInfo> = linkedMapOf()
+  private var applicationListSnapshot: List<PackageInfo> = emptyList()
+  private var applicationMapSnapshot: Map<String, PackageInfo> = emptyMap()
+  private var applicationsLoaded: Boolean = false
+  private val apexPackageSet: Set<String> by lazy { loadApexPackageSet() }
 
-  override fun getApplicationList(): List<PackageInfo> {
-    Timber.d("getApplicationList start")
-    val flag = if (OsUtils.atLeastV()) PackageManager.MATCH_ARCHIVED_PACKAGES else 0
-    val list = PackageManagerCompat.getInstalledPackages(flag)
-    Timber.d("getApplicationList end, apps count: ${list.size}")
+  override fun getApplicationList(forceUpdate: Boolean): List<PackageInfo> {
+    ensureApplicationsLoaded(forceUpdate)
+    return applicationsLock.read {
+      applicationListSnapshot
+    }
+  }
 
-    loadApexPackageSet()
+  override fun getApplicationMap(forceUpdate: Boolean): Map<String, PackageInfo> {
+    ensureApplicationsLoaded(forceUpdate)
+    return applicationsLock.read {
+      applicationMapSnapshot
+    }
+  }
+
+  override fun getApplicationCount(forceUpdate: Boolean): Int {
+    ensureApplicationsLoaded(forceUpdate)
+    return applicationsLock.read {
+      applicationMap.size
+    }
+  }
+
+  override fun getRandomApplicationInfo(forceUpdate: Boolean): ApplicationInfo? {
+    ensureApplicationsLoaded(forceUpdate)
+    return applicationsLock.read {
+      applicationListSnapshot.randomOrNull()?.applicationInfo
+    }
+  }
+
+  override fun getApexPackageNames(): Set<String> {
+    return apexPackageSet
+  }
+
+  private fun ensureApplicationsLoaded(forceUpdate: Boolean = false) {
+    if (!forceUpdate && applicationsLock.read { applicationsLoaded }) {
+      return
+    }
+    applicationsLock.write {
+      if (forceUpdate || !applicationsLoaded) {
+        refreshApplicationsLocked()
+      }
+    }
+  }
+
+  private fun refreshApplicationsLocked() {
+    applicationMap.clear()
+    loadApplications()
+      .asSequence()
+      .filter { it.isVisiblePackageInfo() }
+      .forEach { applicationMap[it.packageName] = it }
+    updateSnapshotsLocked()
+    applicationsLoaded = true
+  }
+
+  private fun loadApplications(): List<PackageInfo> {
+    Timber.d("loadApplications start")
+    val flags = if (OsUtils.atLeastV()) PackageManager.MATCH_ARCHIVED_PACKAGES else 0L
+    val list = PackageManagerCompat.getInstalledPackages(flags)
+    Timber.d("loadApplications end, apps count: ${list.size}")
     return list
   }
 
-  override fun getApplicationMap(): Map<String, PackageInfo> {
-    return getApplicationList().asSequence()
-      .filter { it.applicationInfo?.sourceDir != null || it.applicationInfo?.publicSourceDir != null || it.isArchivedPackage() }
-      .map { it.packageName to it }
-      .toMap()
+  private fun loadPackageInfo(packageName: String): PackageInfo? {
+    return runCatching { PackageUtils.getPackageInfo(packageName) }.getOrNull()
+  }
+
+  private fun PackageInfo.isVisiblePackageInfo(): Boolean {
+    return applicationInfo?.sourceDir != null || applicationInfo?.publicSourceDir != null || isArchivedPackage()
   }
 
   /**
@@ -35,17 +97,48 @@ object LocalAppDataSource : AppDataSource {
    * PackageInfo#isApex is always false
    * use this method to workaround
    */
-  private fun loadApexPackageSet() {
-    Timber.d("getApplicationList get apex start")
+  private fun loadApexPackageSet(): Set<String> {
     if (OsUtils.atLeastQ()) {
-      apexPackageSet = runCatching {
-        SystemServices.packageManager.getInstalledModules(0)
+      Timber.d("loadApexPackageSet start")
+      return runCatching {
+        SystemServices.packageManager.getInstalledModules(PackageManager.MATCH_ALL)
           .map { it.packageName.orEmpty() }
           .toSet()
       }.onFailure {
         Timber.e(it)
+      }.onSuccess {
+        Timber.d("loadApexPackageSet end, apex count: ${it.size}")
       }.getOrDefault(emptySet())
     }
-    Timber.d("getApplicationList get apex end, apex count: ${apexPackageSet.size}")
+    return emptySet()
+  }
+
+  override fun updateApplications(state: PackageChangeState) {
+    applicationsLock.write {
+      if (!applicationsLoaded) {
+        refreshApplicationsLocked()
+      }
+      val packageName = state.packageName
+      when (state) {
+        is PackageChangeState.Removed -> {
+          applicationMap.remove(packageName)
+        }
+
+        is PackageChangeState.Added, is PackageChangeState.Replaced -> {
+          val packageInfo = loadPackageInfo(packageName)
+          if (packageInfo?.isVisiblePackageInfo() == true) {
+            applicationMap[packageName] = packageInfo
+          } else {
+            applicationMap.remove(packageName)
+          }
+        }
+      }
+      updateSnapshotsLocked()
+    }
+  }
+
+  private fun updateSnapshotsLocked() {
+    applicationListSnapshot = applicationMap.values.toList()
+    applicationMapSnapshot = applicationMap.toMap()
   }
 }

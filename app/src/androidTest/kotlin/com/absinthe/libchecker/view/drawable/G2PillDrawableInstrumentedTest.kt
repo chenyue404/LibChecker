@@ -1,0 +1,35 @@
+package com.absinthe.libchecker.view.drawable
+
+import android.graphics.Color
+import android.graphics.Outline
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class G2PillDrawableInstrumentedTest {
+
+  @Test
+  fun getOutlineSupportsCurrentDevice() {
+    val drawable = G2PillDrawable(fillColor = Color.BLACK)
+    drawable.setBounds(0, 0, 240, 48)
+    val outline = Outline()
+
+    drawable.getOutline(outline)
+
+    assertTrue(outline.canClip())
+  }
+
+  @Test
+  fun invalidConvexPathUsesFallback() {
+    var fallbackCalled = false
+
+    setConvexPathOrFallback(
+      setConvexPath = { throw IllegalArgumentException("path must be convex") },
+      setFallback = { fallbackCalled = true }
+    )
+
+    assertTrue(fallbackCalled)
+  }
+}

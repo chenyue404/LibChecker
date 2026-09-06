@@ -174,6 +174,11 @@
   <string name="lib_detail_app_install_source_shizuku_not_running_detail">按一下這裡以跳轉到 Shizuku 以將其啟動</string>
   <string name="lib_detail_app_install_source_shizuku_permission_not_granted">Shizuku 未經授權</string>
   <string name="lib_detail_app_install_source_shizuku_permission_not_granted_detail">按一下這裡進行 Shizuku 授權以取得安裝要求者</string>
+  <string name="adaptive_icon_layer_background">背景</string>
+  <string name="adaptive_icon_layer_foreground">前景</string>
+  <string name="adaptive_icon_copy_full">複製完整圖示</string>
+  <string name="adaptive_icon_copy_background">複製背景圖層</string>
+  <string name="adaptive_icon_copy_foreground">複製前景圖層</string>
   <!--  Toast  -->
   <string name="toast_copied_to_clipboard">已複製到剪貼簿</string>
   <string name="toast_not_existing_market">裝置中不存在應用市集</string>
@@ -200,13 +205,13 @@
   <string name="snapshot_generate_text_report">產生文字報告</string>
   <string name="snapshot_scheme_tip"><![CDATA[提示：現在您可以透過<br><b>%s</b><br>在背景產生快照。]]></string>
   <!--  Dialog  -->
-  <string name="dialog_title_reload_apps">確定要重新載入應用程式清單嗎？</string>
+  <string name="dialog_title_reload_apps">重新載入應用程式清單？</string>
   <string name="dialog_subtitle_reload_apps">這可能會花費幾秒鐘的時間</string>
   <string name="dialog_title_change_timestamp">變更時間節點</string>
   <string name="dialog_title_keep_previous_snapshot">注意</string>
   <string name="dialog_message_keep_previous_snapshot">是否保留上一張快照？</string>
   <string name="dialog_title_select_to_delete">選擇日期以刪除快照</string>
-  <string name="dialog_title_confirm_to_delete">您確定要刪除這個快照嗎？</string>
+  <string name="dialog_title_confirm_to_delete">刪除這個快照？</string>
   <string name="btn_keep">保留</string>
   <string name="btn_drop">捨棄</string>
   <string name="dialog_title_compare_diff_apk">注意</string>
@@ -265,4 +270,5 @@
   <string name="snapshot_menu_show_update_time">顯示更新時間</string>
   <string name="snapshot_menu_hide_no_component_changes">隱藏沒有元件變更</string>
   <string name="snapshot_menu_diff_highlight">重點標示差異</string>
+  <!-- A11y -->
 </resources>

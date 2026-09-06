@@ -2,16 +2,6 @@ plugins {
   `kotlin-dsl`
 }
 
-repositories {
-  google {
-    content {
-      includeGroupByRegex(".*google.*")
-      includeGroupByRegex(".*android.*")
-    }
-  }
-  mavenCentral()
-}
-
 gradlePlugin {
   plugins {
     create("build-logic") {
@@ -22,9 +12,9 @@ gradlePlugin {
       id = "res-opt"
       implementationClass = "ResoptPlugin"
     }
-    create("clean-aboutlibraries") {
-      id = "clean-aboutlibraries"
-      implementationClass = "CleanAboutLibrariesPlugin"
+    create("market-stable-manifest") {
+      id = "market-stable-manifest"
+      implementationClass = "MarketStableManifestPlugin"
     }
   }
 }
@@ -32,4 +22,5 @@ gradlePlugin {
 dependencies {
   implementation(libs.gradlePlugin.android)
   implementation(libs.gradlePlugin.kotlin)
+  implementation(libs.gradlePlugin.spotless)
 }

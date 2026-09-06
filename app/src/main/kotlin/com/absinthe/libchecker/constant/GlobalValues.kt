@@ -1,6 +1,5 @@
 package com.absinthe.libchecker.constant
 
-import android.content.SharedPreferences
 import androidx.core.content.edit
 import com.absinthe.libchecker.BuildConfig
 import com.absinthe.libchecker.LibCheckerApp
@@ -9,13 +8,12 @@ import com.absinthe.libchecker.app.SystemServices
 import com.absinthe.libchecker.constant.options.AdvancedOptions
 import com.absinthe.libchecker.constant.options.LibReferenceOptions
 import com.absinthe.libchecker.constant.options.SnapshotOptions
-import com.absinthe.libchecker.features.applist.MODE_SORT_BY_SIZE
-import com.absinthe.libchecker.utils.DateUtils
+import com.absinthe.libchecker.domain.app.detail.ui.MODE_SORT_BY_SIZE
+import com.absinthe.libchecker.utils.GitHubTokenStore
 import com.absinthe.libchecker.utils.OsUtils
 import com.absinthe.libchecker.utils.PackageUtils
 import com.absinthe.libchecker.utils.SPDelegates
 import com.absinthe.libchecker.utils.SPUtils
-import com.absinthe.libchecker.utils.extensions.unsafeLazy
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,10 +28,6 @@ object GlobalValues {
       uuid = UUID.randomUUID().toString()
     }
     return (uuid.hashCode() + PackageUtils.getPackageInfo(app.packageName).firstInstallTime).mod(90000) + 10000
-  }
-
-  private fun getPreferences(): SharedPreferences {
-    return SPUtils.sp
   }
 
   val preferencesFlow = MutableSharedFlow<Pair<String, Any>>()
@@ -58,6 +52,8 @@ object GlobalValues {
 
   var darkMode: String by SPDelegates(Constants.PREF_DARK_MODE, Constants.DARK_MODE_FOLLOW_SYSTEM)
 
+  var isAmoledTheme: Boolean by SPDelegates(Constants.PREF_AMOLED_THEME, false)
+
   var libSortMode: Int by SPDelegates(Constants.PREF_LIB_SORT_MODE, MODE_SORT_BY_SIZE)
 
   var processMode: Boolean by SPDelegates(Constants.PREF_PROCESS_MODE, false)
@@ -69,13 +65,62 @@ object GlobalValues {
 
   var isColorfulIcon: Boolean by SPDelegates(Constants.PREF_COLORFUL_ICON, true)
 
+  var isBlurDesign: Boolean by SPDelegates(Constants.PREF_BLUR_DESIGN, false)
+  var isFloatingNavBar: Boolean by SPDelegates(Constants.PREF_FLOATING_NAV_BAR, false)
+
   val isAnonymousAnalyticsEnabled: Boolean by SPDelegates(Constants.PREF_ANONYMOUS_ANALYTICS, true)
 
   var isDetailedAbiChart: Boolean by SPDelegates(Constants.PREF_DETAILED_ABI_CHART, false)
 
   var preferredRuleLanguage: String by SPDelegates(Constants.PREF_RULE_LANGUAGE, "zh-Hans")
 
-  val season by unsafeLazy { DateUtils.getCurrentSeason() }
+  var githubApiTokenVersion: Int by SPDelegates(Constants.PREF_GITHUB_API_TOKEN_VERSION, 0)
+
+  var githubApiToken: String
+    get() {
+      val token = GitHubTokenStore.get()
+      if (token.isNotEmpty()) {
+        return token
+      }
+
+      val legacyToken = SPUtils.sp
+        .getString(Constants.PREF_GITHUB_API_TOKEN, null)
+        ?.trim()
+        .orEmpty()
+      if (legacyToken.isNotEmpty()) {
+        if (GitHubTokenStore.set(legacyToken)) {
+          SPUtils.sp.edit { remove(Constants.PREF_GITHUB_API_TOKEN) }
+          return legacyToken
+        }
+        SPUtils.sp.edit { remove(Constants.PREF_GITHUB_API_TOKEN) }
+        return String()
+      }
+      return String()
+    }
+    set(value) {
+      val token = value.trim()
+      if (token == githubApiToken) {
+        SPUtils.sp.edit { remove(Constants.PREF_GITHUB_API_TOKEN) }
+        return
+      }
+
+      SPUtils.sp.edit { remove(Constants.PREF_GITHUB_API_TOKEN) }
+      if (GitHubTokenStore.set(token)) {
+        githubApiTokenVersion += 1
+      }
+    }
+
+  private const val GITHUB_API_ROOT_URL = "https://api.github.com/"
+
+  private val githubApiAuthorizationHeader: String?
+    get() = githubApiToken
+      .trim()
+      .takeIf { it.isNotEmpty() }
+      ?.let { "Bearer $it" }
+
+  fun githubApiAuthorizationHeaderFor(url: String): String? {
+    return githubApiAuthorizationHeader.takeIf { url.startsWith(GITHUB_API_ROOT_URL) }
+  }
 
   var locale: Locale = Locale.getDefault()
     get() {
@@ -85,11 +130,11 @@ object GlobalValues {
         val locale = systemSelectedLocale.get(0) ?: Locale.getDefault()
         if (locale != field) {
           field = locale
-          getPreferences().edit { putString(Constants.PREF_LOCALE, locale.toLanguageTag()) }
+          SPUtils.sp.edit { putString(Constants.PREF_LOCALE, locale.toLanguageTag()) }
         }
         return locale
       }
-      val tag = getPreferences().getString(Constants.PREF_LOCALE, null)
+      val tag = SPUtils.sp.getString(Constants.PREF_LOCALE, null)
       if (tag.isNullOrEmpty() || "SYSTEM" == tag) {
         return Locale.getDefault()
       }
@@ -97,7 +142,7 @@ object GlobalValues {
     }
     set(value) {
       field = value
-      getPreferences().edit { putString(Constants.PREF_LOCALE, value.toLanguageTag()) }
+      SPUtils.sp.edit { putString(Constants.PREF_LOCALE, value.toLanguageTag()) }
     }
 
   var uuid: String by SPDelegates(Constants.PREF_UUID, String())
@@ -107,4 +152,6 @@ object GlobalValues {
   var trackItemsChanged = false
 
   var snapshotAutoRemoveThreshold: Int by SPDelegates(Constants.PREF_SNAPSHOT_AUTO_REMOVE_THRESHOLD, -1)
+
+  var longTapShareButtonTip: Boolean by SPDelegates(Constants.PREF_LONG_TAP_SHARE_BUTTON_TIP, false)
 }

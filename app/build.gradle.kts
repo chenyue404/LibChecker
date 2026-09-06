@@ -1,33 +1,34 @@
-import com.android.build.gradle.internal.api.ApkVariantOutputImpl
 import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 
 plugins {
   alias(libs.plugins.android.application)
-  alias(libs.plugins.kotlin.android)
   alias(libs.plugins.kotlin.parcelize)
   alias(libs.plugins.protobuf)
   alias(libs.plugins.hiddenApiRefine)
   alias(libs.plugins.ksp)
+  alias(libs.plugins.androidX.room3)
   alias(libs.plugins.moshiX)
   alias(libs.plugins.aboutlibraries)
-  id("clean-aboutlibraries")
-  id("res-opt") apply false
-  id(libs.plugins.gms.get().pluginId)
-  id(libs.plugins.firebase.crashlytics.get().pluginId)
+  alias(libs.plugins.gms)
+  alias(libs.plugins.firebase.crashlytics)
+  id("build-logic")
+  id("res-opt")
+  id("market-stable-manifest")
 }
 
 ksp {
   arg("moshi.generated", "javax.annotation.Generated")
-  arg("room.generateKotlin", "true")
-  arg("room.incremental", "true")
-  arg("room.schemaLocation", "$projectDir/schemas")
-  arg("room.expandProjection", "true")
+}
+
+room3 {
+  schemaDirectory("$projectDir/schemas")
 }
 
 setupAppModule {
   namespace = "com.absinthe.libchecker"
   defaultConfig {
     applicationId = "com.absinthe.libchecker"
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   buildFeatures {
@@ -42,6 +43,22 @@ setupAppModule {
         mappingFileUploadEnabled = false
       }
     }
+    release {
+      optimization {
+        enable = true
+        keepRules {
+          // https://github.com/AppDevNext/AndroidChart/blob/master/chartLib/proguard-lib.pro
+          ignoreFrom(libs.mpAndroidChart.get().module.toString())
+        }
+      }
+    }
+    create("benchmark") {
+      initWith(getByName("release"))
+      applicationIdSuffix = ".debug"
+      matchingFallbacks += listOf("release")
+      proguardFiles("src/benchmark/keepRules/proguard-rules.keep")
+      signingConfig = signingConfigs.getByName("debug")
+    }
   }
 
   productFlavors {
@@ -49,15 +66,17 @@ setupAppModule {
 
     create("foss") {
       isDefault = true
-      dimension = flavorDimensionList[0]
+      dimension = flavorDimensions[0]
+      buildConfigField("Boolean", "IS_FOSS", "true")
       configure<CrashlyticsExtension> {
         mappingFileUploadEnabled = false
       }
     }
     create("market") {
-      dimension = flavorDimensionList[0]
+      dimension = flavorDimensions[0]
+      buildConfigField("Boolean", "IS_FOSS", "false")
     }
-    all {
+    configureEach {
       manifestPlaceholders["channel"] = this.name
     }
   }
@@ -66,44 +85,45 @@ setupAppModule {
     jniLibs {
       excludes += "lib/**/libdatastore_shared_counter.so" // Jetpack DataStore
     }
+    resources {
+      excludes += setOf(
+        "META-INF/**",
+        "okhttp3/**",
+        "kotlin/**",
+        "org/**",
+        "**.properties",
+        "**.bin",
+        "**/*.proto"
+      )
+    }
   }
-
-  packagingOptions.resources.excludes += setOf(
-    "META-INF/**",
-    "okhttp3/**",
-    "kotlin/**",
-    "org/**",
-    "**.properties",
-    "**.bin",
-    "**/*.proto"
-  )
 
   lint {
     disable += setOf("AppCompatResource", "MissingTranslation")
   }
 
   dependenciesInfo.includeInApk = false
+}
 
-  applicationVariants.configureEach {
-    outputs.configureEach {
-      (this as? ApkVariantOutputImpl)?.outputFileName =
-        "LibChecker-$verName-$verCode-$name.apk"
+androidComponents {
+  onVariants { variant ->
+    variant.outputs.forEach { output ->
+      output.outputFileName.set(
+        output.versionName.zip(output.versionCode) { versionName, versionCode ->
+          "LibChecker-$versionName-$versionCode-${variant.buildType}.apk"
+        }
+      )
     }
   }
 }
 
-configurations.configureEach {
-  exclude("androidx.appcompat", "appcompat")
-  exclude("org.jetbrains.kotlin", "kotlin-stdlib-jdk7")
-  exclude("org.jetbrains.kotlin", "kotlin-stdlib-jdk8")
-}
-
 dependencies {
-  compileOnly(projects.hiddenApi)
+  compileOnly(dependencies.project(":hidden-api"))
 
+  implementation(projects.compat)
   implementation(libs.kotlinX.coroutines)
-  // implementation(libs.androidX.appCompat)
-  implementation(libs.android.apksig)
+  implementation(platform(libs.koin.bom))
+  implementation(libs.koin.android)
   implementation(libs.androidX.core)
   implementation(libs.androidX.activity)
   implementation(libs.androidX.fragment)
@@ -113,11 +133,11 @@ dependencies {
   implementation(libs.androidX.recyclerView)
   implementation(libs.androidX.preference)
   implementation(libs.androidX.window)
-  implementation(libs.androidX.security)
   implementation(libs.bundles.androidX.lifecycle)
-  implementation(libs.bundles.androidX.room)
+  implementation(libs.bundles.androidX.room3)
   implementation(libs.google.material)
   implementation(libs.coil)
+  implementation(libs.coil.svg)
   implementation(libs.square.okHttp)
   implementation(libs.square.okio)
   implementation(libs.square.retrofit)
@@ -128,11 +148,13 @@ dependencies {
   implementation(libs.rikka.refine.runtime)
   implementation(libs.bundles.zhaobozhen)
   implementation(libs.lc.rules)
-  // implementation(files("libs/library-release.aar"))
+  ksp(libs.androidX.room3.compiler)
 
-  ksp(libs.androidX.room.compiler)
+  testImplementation(libs.junit)
 
-  implementation(libs.lottie)
+  androidTestImplementation(libs.androidX.test.ext.junit)
+  androidTestImplementation(libs.androidX.test.runner)
+
   implementation(libs.aboutlibraries.core)
   implementation(libs.aboutlibraries.ui)
   implementation(libs.brvah)
@@ -151,7 +173,6 @@ dependencies {
 
   implementation(libs.bundles.shizuku)
 
-  debugImplementation(libs.square.leakCanary)
   "marketCompileOnly"(fileTree("ohos"))
   "marketImplementation"(platform(libs.firebase.bom))
   "marketImplementation"(libs.bundles.firebase) {
@@ -172,8 +193,8 @@ protobuf {
   }
   plugins {
     generateProtoTasks {
-      all().forEach {
-        it.builtins {
+      all().configureEach {
+        builtins {
           create("java") {
             option("lite")
           }

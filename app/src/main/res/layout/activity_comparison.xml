@@ -2,18 +2,13 @@
   xmlns:app="http://schemas.android.com/apk/res-auto"
   android:id="@+id/container"
   android:layout_width="match_parent"
-  android:layout_height="match_parent"
-  android:fitsSystemWindows="false"
-  app:consumeSystemWindowsInsets="start|end"
-  app:edgeToEdge="true"
-  app:fitsSystemWindowsInsets="start|end">
+  android:layout_height="match_parent">
 
   <com.google.android.material.appbar.AppBarLayout
     android:id="@+id/appbar"
-    style="?appBarStyle"
+    style="?attr/appBarLayoutStyle"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:fitsSystemWindows="true"
     app:layout_constraintTop_toTopOf="parent">
 
     <androidx.appcompat.widget.ToolbarFix
@@ -37,13 +32,11 @@
       android:orientation="vertical"
       android:paddingTop="?actionBarSize">
 
-      <com.airbnb.lottie.LottieAnimationView
+      <com.absinthe.libchecker.view.app.RingDotsView
         android:id="@+id/loading"
-        android:layout_width="@dimen/lottie_anim_size"
-        android:layout_height="@dimen/lottie_anim_size"
-        app:lottie_autoPlay="true"
-        app:lottie_fileName="anim/holographic_radar.json.zip"
-        app:lottie_loop="true" />
+        android:layout_width="@dimen/general_loading_size"
+        android:layout_height="@dimen/general_loading_size"
+        android:layout_gravity="center" />
 
     </LinearLayout>
 
@@ -57,21 +50,8 @@
       android:scrollbars="none"
       app:borderBottomVisibility="never"
       app:borderTopDrawable="@null"
-      app:borderTopVisibility="whenTop"
-      app:fitsSystemWindowsInsets="bottom|top" />
+      app:borderTopVisibility="whenTop" />
 
   </ViewFlipper>
-
-  <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
-    style="?attr/extendedFloatingActionButtonSurfaceStyle"
-    android:id="@+id/extended_fab"
-    android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:layout_margin="24dp"
-    android:text="@string/album_compare"
-    app:icon="@drawable/ic_compare"
-    app:layout_constraintBottom_toBottomOf="parent"
-    app:layout_constraintEnd_toEndOf="parent"
-    app:layout_fitsSystemWindowsInsets="bottom|end" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

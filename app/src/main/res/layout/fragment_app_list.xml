@@ -4,19 +4,28 @@
   xmlns:tools="http://schemas.android.com/tools"
   android:layout_width="match_parent"
   android:layout_height="match_parent"
-  tools:context=".features.applist.ui.AppListFragment">
+  tools:context=".domain.app.list.ui.AppListFragment">
 
   <com.absinthe.libchecker.view.app.CustomViewFlipper
     android:id="@+id/vf_container"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:clipChildren="false">
 
-    <com.google.android.material.loadingindicator.LoadingIndicator
-      style="@style/Widget.Material3.LoadingIndicator.Contained"
-      android:id="@+id/loading_view"
-      android:layout_width="wrap_content"
-      android:layout_height="wrap_content"
-      android:layout_gravity="center" />
+    <FrameLayout
+      android:id="@+id/loading_view_container"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent">
+
+      <ViewStub
+        android:id="@+id/loading_view_stub"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout="@layout/view_app_list_loading"
+        android:layout_gravity="center"
+        android:inflatedId="@+id/loading_view" />
+
+    </FrameLayout>
 
     <rikka.widget.borderview.BorderRecyclerView
       android:id="@android:id/list"
@@ -26,16 +35,15 @@
       android:scrollbars="none"
       app:borderBottomVisibility="never"
       app:borderTopDrawable="@null"
-      app:borderTopVisibility="whenTop"
-      app:fitsSystemWindowsInsets="bottom" />
+      app:borderTopVisibility="whenTop" />
 
-    <com.absinthe.libchecker.features.applist.ui.view.AppListInitialiseView
+    <com.absinthe.libchecker.domain.app.list.ui.view.AppListInitialiseView
       android:id="@+id/init_view"
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"
       android:layout_gravity="center" />
 
-    <com.absinthe.libchecker.features.applist.ui.view.AppListRejectView
+    <com.absinthe.libchecker.domain.app.list.ui.view.AppListRejectView
       android:id="@+id/reject_view"
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"

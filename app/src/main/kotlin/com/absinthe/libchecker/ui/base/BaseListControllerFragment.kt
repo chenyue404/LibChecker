@@ -1,5 +1,6 @@
 package com.absinthe.libchecker.ui.base
 
+import android.content.res.Configuration
 import android.os.Bundle
 import android.view.Menu
 import android.view.View
@@ -9,9 +10,12 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.StaggeredGridLayoutManager
 import androidx.viewbinding.ViewBinding
-import com.absinthe.libchecker.features.home.HomeViewModel
+import com.absinthe.libchecker.domain.home.presentation.HomeViewModel
+import rikka.widget.borderview.BorderRecyclerView
+import rikka.widget.borderview.BorderView
 import rikka.widget.borderview.BorderViewDelegate
 
 abstract class BaseListControllerFragment<T : ViewBinding> :
@@ -25,20 +29,12 @@ abstract class BaseListControllerFragment<T : ViewBinding> :
   protected var allowRefreshing = true
   protected var menu: Menu? = null
 
-  private var lastPackageChangedTime: Long = 0
-
   override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
     super.onViewCreated(view, savedInstanceState)
     activity?.addMenuProvider(this, viewLifecycleOwner, Lifecycle.State.RESUMED)
     viewLifecycleOwner.lifecycle.addObserver(object : DefaultLifecycleObserver {
-      override fun onResume(owner: LifecycleOwner) {
-        scheduleAppbarLiftingStatus(getBorderViewDelegate()?.isShowingTopBorder == false)
-      }
-
       override fun onStop(owner: LifecycleOwner) {
-        if (this == homeViewModel.controller) {
-          homeViewModel.controller = null
-        }
+        listControllerHost?.clearListController(this@BaseListControllerFragment)
       }
     })
   }
@@ -46,11 +42,13 @@ abstract class BaseListControllerFragment<T : ViewBinding> :
   override fun onVisibilityChanged(visible: Boolean) {
     super.onVisibilityChanged(visible)
     if (visible) {
-      if (this != homeViewModel.controller) {
-        homeViewModel.controller = this
-      }
+      listControllerHost?.setListController(this)
+      scheduleAppbarLiftingStatus(getBorderViewDelegate()?.isShowingTopBorder == false)
     }
   }
+
+  protected val listControllerHost: IListControllerHost?
+    get() = activity as? IListControllerHost
 
   override fun getBorderViewDelegate(): BorderViewDelegate? = borderDelegate
 
@@ -58,6 +56,33 @@ abstract class BaseListControllerFragment<T : ViewBinding> :
 
   protected fun scheduleAppbarLiftingStatus(isLifted: Boolean) {
     (activity as? IAppBarContainer)?.scheduleAppbarLiftingStatus(isLifted)
+  }
+
+  protected fun wireListScreenChrome(recyclerView: BorderRecyclerView) {
+    borderDelegate = recyclerView.borderViewDelegate
+    recyclerView.borderVisibilityChangedListener =
+      BorderView.OnBorderVisibilityChangedListener { top: Boolean, _: Boolean, _: Boolean, _: Boolean ->
+        if (isFragmentVisible()) {
+          scheduleAppbarLiftingStatus(!top)
+        }
+      }
+  }
+
+  protected fun createListScreenLayoutManager(configuration: Configuration): RecyclerView.LayoutManager {
+    return when (configuration.orientation) {
+      Configuration.ORIENTATION_PORTRAIT -> LinearLayoutManager(requireContext())
+
+      Configuration.ORIENTATION_LANDSCAPE ->
+        StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL)
+
+      else -> error("Wrong orientation at ${javaClass.simpleName}.")
+    }
+  }
+
+  protected fun onListScreenVisibilityChanged(visible: Boolean, recyclerView: RecyclerView) {
+    if (visible) {
+      (activity as? IAppBarContainer)?.setLiftOnScrollTargetView(recyclerView)
+    }
   }
 
   protected fun canListScroll(listSize: Int): Boolean {
@@ -83,16 +108,25 @@ abstract class BaseListControllerFragment<T : ViewBinding> :
     }
     return false
   }
+}
 
-  protected fun hasPackageChanged(): Boolean {
-    homeViewModel.workerBinder?.let {
-      val serverLastPackageChangedTime =
-        runCatching { it.lastPackageChangedTime }.getOrElse { return false }
-      if (lastPackageChangedTime < serverLastPackageChangedTime) {
-        lastPackageChangedTime = serverLastPackageChangedTime
-        return true
-      }
-    }
-    return false
-  }
+internal data class InitialListSearchState(
+  val query: String,
+  val shouldExpand: Boolean
+)
+
+internal fun initialListSearchState(
+  retainedQuery: String,
+  toolbarState: HomeViewModel.ToolbarSearchMenuState
+): InitialListSearchState {
+  return InitialListSearchState(
+    query = retainedQuery,
+    shouldExpand = retainedQuery.isNotEmpty() || toolbarState.isExpanded
+  )
+}
+
+internal fun shouldHandleListSearchQueryChange(
+  lifecycleState: Lifecycle.State
+): Boolean {
+  return lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
 }

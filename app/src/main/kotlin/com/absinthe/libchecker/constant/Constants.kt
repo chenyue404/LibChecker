@@ -1,7 +1,5 @@
 package com.absinthe.libchecker.constant
 
-import com.absinthe.rulesbundle.Repositories
-
 object Constants {
 
   const val ERROR = -1
@@ -58,20 +56,20 @@ object Constants {
   const val PREF_ANONYMOUS_ANALYTICS = "analytics"
   const val PREF_CLOUD_RULES = "cloudRules"
   const val PREF_SNAPSHOT_KEEP = "snapshotKeep"
+  const val PREF_GITHUB_API_TOKEN = "githubApiToken"
+  const val PREF_GITHUB_API_TOKEN_VERSION = "githubApiTokenVersion"
 
   const val PREF_LIB_SORT_MODE = "libSortMode"
   const val PREF_PROCESS_MODE = "processMode"
   const val PREF_SNAPSHOT_TIMESTAMP = "snapshotTimestamp"
   const val PREF_DISTRIBUTION_UPDATE_TIMESTAMP = "distributionUpdateTimestamp"
 
-  const val PREF_LOCAL_BACKUP = "localBackup"
-  const val PREF_LOCAL_RESTORE = "localRestore"
-
   const val PREF_LOCALE = "locale"
 
   const val PREF_DEBUG_MODE = "debugMode"
 
   const val PREF_DARK_MODE = "darkMode"
+  const val PREF_AMOLED_THEME = "amoledTheme"
   const val DARK_MODE_OFF = "off"
   const val DARK_MODE_ON = "on"
   const val DARK_MODE_FOLLOW_SYSTEM = "system"
@@ -92,9 +90,6 @@ object Constants {
   const val COMMAND_DUMP_APPS_INFO_TXT = "/dumpAppsInfoTxt"
   const val COMMAND_DUMP_APPS_INFO_MD = "/dumpAppsInfoMd"
 
-  const val RULES_DB_FILE_NAME = "rules.db"
-  const val RULES_DATABASE_NAME = Repositories.RULES_DATABASE_NAME
-
   const val PREF_UUID = "uuid"
   const val PREF_ADVANCED_OPTIONS = "advancedOptions"
   const val PREF_ITEM_ADVANCED_OPTIONS = "itemAdvancedOptions"
@@ -103,10 +98,17 @@ object Constants {
 
   const val PP_FROM_CLOUD_RULES_UPDATE = "ruleDatabaseUpdate"
   const val PREF_EXPORT_LOG = "exportLog"
+  const val PREF_EXPORT_APPS = "exportApps"
 
   const val PREF_DETAILED_ABI_CHART = "detailedAbiChart"
   const val PREF_RULE_LANGUAGE = "ruleLanguage"
   const val PREF_SNAPSHOT_AUTO_REMOVE_THRESHOLD = "snapshotAutoRemoveThreshold"
+  const val PREF_LONG_TAP_SHARE_BUTTON_TIP = "longTapShareButtonTip"
+
+  const val PREF_BLUR_DESIGN = "blurDesign"
+  const val PREF_FLOATING_NAV_BAR = "floatingNavBar"
+
+  const val GET_INSTALLED_APPS = "com.android.permission.GET_INSTALLED_APPS"
 
   object Event {
     const val APP_INFO_BOTTOM_SHEET = "App Info Bottom Sheet"
@@ -125,8 +127,6 @@ object Constants {
   }
 
   object PackageNames {
-    const val MATERIAL_FILES = "me.zhanghai.android.files"
-    const val SHIZUKU = "moe.shizuku.privileged.api"
     const val SYSTEMUI = "com.android.systemui"
     const val ANYWHERE_ = "com.absinthe.anywhere_"
   }

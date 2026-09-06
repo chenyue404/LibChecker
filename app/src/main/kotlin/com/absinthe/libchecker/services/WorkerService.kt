@@ -1,48 +1,27 @@
 package com.absinthe.libchecker.services
 
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.content.pm.PackageManager
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.os.Message
-import android.os.RemoteCallbackList
-import android.os.RemoteException
-import android.os.SystemClock
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
-import com.absinthe.libchecker.database.Repositories
-import com.absinthe.libchecker.utils.PackageUtils
-import com.absinthe.libchecker.utils.extensions.getFeatures
+import com.absinthe.libchecker.domain.app.list.usecase.InitializePendingAppFeaturesUseCase
+import com.absinthe.libchecker.domain.app.repository.InstalledAppRepository
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import org.koin.android.ext.android.inject
 import timber.log.Timber
 
 class WorkerService : LifecycleService() {
 
-  private lateinit var mainHandler: MyHandler
-  private var lastPackageChangedTime: Long = 0L
-
-  private val packageReceiver by lazy {
-    object : BroadcastReceiver() {
-      override fun onReceive(context: Context, intent: Intent?) {
-        Timber.d("package receiver received: ${intent?.action}")
-
-        val what = intent?.data?.encodedSchemeSpecificPart.orEmpty().hashCode()
-        mainHandler.removeMessages(what)
-        mainHandler.sendMessageDelayed(Message.obtain(mainHandler, what, intent), 1000)
-      }
-    }
-  }
-
-  private val listenerList = RemoteCallbackList<OnWorkerListener>()
+  private val initializePendingAppFeatures: InitializePendingAppFeaturesUseCase by inject()
+  private val installedAppRepository: InstalledAppRepository by inject()
   private val binder by lazy { WorkerBinder(this) }
+  private var initFeaturesJob: Job? = null
+  private var pendingInitFeaturesRequest = false
 
   override fun onBind(intent: Intent): IBinder {
     super.onBind(intent)
@@ -52,16 +31,8 @@ class WorkerService : LifecycleService() {
   override fun onCreate() {
     super.onCreate()
     Timber.d("onCreate")
-    initializingFeatures = false
-    mainHandler = MyHandler(WeakReference(this))
-
-    val intentFilter = IntentFilter().apply {
-      addAction(Intent.ACTION_PACKAGE_ADDED)
-      addAction(Intent.ACTION_PACKAGE_REPLACED)
-      addAction(Intent.ACTION_PACKAGE_REMOVED)
-      addDataScheme("package")
-    }
-    registerReceiver(packageReceiver, intentFilter)
+    updateFeatureInitializationState(running = false)
+    installedAppRepository.startPackageChangeMonitoring(this)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -73,44 +44,44 @@ class WorkerService : LifecycleService() {
 
   override fun onDestroy() {
     Timber.d("onDestroy")
-    unregisterReceiver(packageReceiver)
-    mainHandler.removeCallbacksAndMessages(null)
+    installedAppRepository.stopPackageChangeMonitoring(this)
     super.onDestroy()
   }
 
   @Synchronized
-  private fun notifyPackagesChanged(packageName: String, action: String) {
-    val count = listenerList.beginBroadcast()
-    for (i in 0 until count) {
-      try {
-        listenerList.getBroadcastItem(i).onReceivePackagesChanged(packageName, action)
-      } catch (e: RemoteException) {
-        Timber.e(e)
-      }
+  private fun initFeatures() {
+    if (initFeaturesJob?.isActive == true) {
+      Timber.d("initFeatures queued")
+      pendingInitFeaturesRequest = true
+      return
     }
-    listenerList.finishBroadcast()
+
+    startInitFeaturesLocked()
   }
 
-  private fun initFeatures() {
+  private fun startInitFeaturesLocked() {
     Timber.d("initFeatures")
-    initializingFeatures = true
+    pendingInitFeaturesRequest = false
+    updateFeatureInitializationState(running = true, completed = false)
 
-    Repositories.lcRepository.allLCItemsFlow.onEach {
-      it.forEach { item ->
-        if (item.features == -1) {
-          runCatching {
-            val feature = PackageUtils.getPackageInfo(item.packageName, PackageManager.GET_META_DATA).getFeatures()
-            Repositories.lcRepository.updateFeatures(item.packageName, feature)
-          }.onFailure { e ->
-            Timber.w(e)
-          }
-        }
+    initFeaturesJob = lifecycleScope.launch(Dispatchers.IO) {
+      try {
+        initializePendingAppFeatures()
+      } finally {
+        finishInitFeatures()
       }
-      initializingFeatures = false
+    }
+  }
+
+  @Synchronized
+  private fun finishInitFeatures() {
+    initFeaturesJob = null
+    if (pendingInitFeaturesRequest) {
+      startInitFeaturesLocked()
+    } else {
+      updateFeatureInitializationState(running = false, completed = true)
       Timber.d("initFeatures finished")
     }
-      .flowOn(Dispatchers.IO)
-      .launchIn(lifecycleScope)
   }
 
   class WorkerBinder(service: WorkerService) : IWorkerService.Stub() {
@@ -120,41 +91,22 @@ class WorkerService : LifecycleService() {
     override fun initFeatures() {
       serviceRef.get()?.initFeatures()
     }
-
-    override fun getLastPackageChangedTime(): Long {
-      return serviceRef.get()?.lastPackageChangedTime ?: 0
-    }
-
-    override fun registerOnWorkerListener(listener: OnWorkerListener?) {
-      Timber.d("registerOnWorkerListener")
-      listener?.let {
-        serviceRef.get()?.listenerList?.register(listener)
-      }
-    }
-
-    override fun unregisterOnWorkerListener(listener: OnWorkerListener?) {
-      Timber.d("unregisterOnWorkerListener")
-      serviceRef.get()?.listenerList?.unregister(listener)
-    }
-  }
-
-  private class MyHandler(private val serviceRef: WeakReference<WorkerService>) : Handler(Looper.getMainLooper()) {
-    override fun handleMessage(msg: Message) {
-      super.handleMessage(msg)
-      val service = serviceRef.get()
-      if (service != null && msg.obj is Intent) {
-        val intent = msg.obj as Intent
-        Timber.d("handleMessage: $intent")
-        service.lastPackageChangedTime = SystemClock.elapsedRealtime()
-        service.notifyPackagesChanged(
-          intent.data?.encodedSchemeSpecificPart.orEmpty(),
-          intent.action.orEmpty()
-        )
-      }
-    }
   }
 
   companion object {
-    var initializingFeatures: Boolean = false
+    data class FeatureInitializationState(
+      val running: Boolean = false,
+      val completed: Boolean = false
+    )
+
+    private val _featureInitializationState = MutableStateFlow(FeatureInitializationState())
+    val featureInitializationState = _featureInitializationState.asStateFlow()
+
+    private fun updateFeatureInitializationState(
+      running: Boolean,
+      completed: Boolean = featureInitializationState.value.completed
+    ) {
+      _featureInitializationState.value = FeatureInitializationState(running, completed)
+    }
   }
 }

@@ -25,12 +25,7 @@ object Toasty {
 
   @AnyThread
   fun showShort(context: Context, message: String) {
-    if (Looper.getMainLooper() == Looper.myLooper()) {
-      //noinspection WrongThread
-      show(context, message, Toast.LENGTH_SHORT)
-    } else {
-      handler.post { show(context, message, Toast.LENGTH_SHORT) }
-    }
+    handler.post { show(context, message, Toast.LENGTH_SHORT) }
   }
 
   @AnyThread
@@ -40,12 +35,7 @@ object Toasty {
 
   @AnyThread
   fun showLong(context: Context, message: String) {
-    if (Looper.getMainLooper() == Looper.myLooper()) {
-      //noinspection WrongThread
-      show(context, message, Toast.LENGTH_LONG)
-    } else {
-      handler.post { show(context, message, Toast.LENGTH_LONG) }
-    }
+    handler.post { show(context, message, Toast.LENGTH_LONG) }
   }
 
   @AnyThread
@@ -84,14 +74,4 @@ fun Context.showToast(message: String) {
 fun Context.showToast(@StringRes res: Int) {
   Timber.d("showToast: ${getString(res)}")
   Toasty.showShort(this, res)
-}
-
-@AnyThread
-fun Context.showLongToast(message: String) {
-  Toasty.showLong(this, message)
-}
-
-@AnyThread
-fun Context.showLongToast(@StringRes res: Int) {
-  Toasty.showLong(this, res)
 }

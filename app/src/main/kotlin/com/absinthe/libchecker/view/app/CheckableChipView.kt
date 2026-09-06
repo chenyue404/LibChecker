@@ -22,9 +22,12 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Outline
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Parcel
 import android.os.Parcelable
 import android.text.Layout
@@ -33,8 +36,9 @@ import android.text.TextPaint
 import android.util.AttributeSet
 import android.view.SoundEffectConstants
 import android.view.View
-import android.view.ViewOutlineProvider
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.AnimationUtils
+import android.widget.CheckBox
 import android.widget.Checkable
 import android.widget.TextView
 import androidx.annotation.CallSuper
@@ -51,6 +55,7 @@ import com.absinthe.libchecker.R
 import com.absinthe.libchecker.utils.extensions.dp
 import com.absinthe.libchecker.utils.extensions.lerp
 import com.absinthe.libchecker.utils.extensions.textWidth
+import com.absinthe.libchecker.view.drawable.setG2Shape
 import java.text.Bidi
 import kotlin.properties.ObservableProperty
 import kotlin.reflect.KProperty
@@ -89,7 +94,9 @@ class CheckableChipView @JvmOverloads constructor(
   /**
    * Sets the text to be displayed.
    */
-  var text: CharSequence by viewProperty("", requestLayout = true)
+  var text: CharSequence by viewProperty("", requestLayout = true) {
+    contentDescription = it
+  }
 
   /**
    * Sets the textSize to be displayed.
@@ -116,7 +123,20 @@ class CheckableChipView @JvmOverloads constructor(
    */
   var onCheckedChangeListener: ((view: CheckableChipView, checked: Boolean) -> Unit)? = null
 
-  var textColorPair = Color.BLACK to Color.WHITE
+  /**
+   * Sets the listener to be called as soon as an animated checked-state change starts.
+   */
+  var onCheckedTargetChangeListener: ((view: CheckableChipView, checked: Boolean) -> Unit)? = null
+
+  var textColorPair = Color.TRANSPARENT to Color.TRANSPARENT
+    set(value) {
+      field = value
+      checkedTextColor = if (isChecked) {
+        value.first
+      } else {
+        value.second
+      }
+    }
 
   private var targetProgress: Float = 0f
 
@@ -147,8 +167,9 @@ class CheckableChipView @JvmOverloads constructor(
   }
 
   init {
-    clipToOutline = true
+    clipToOutline = false
     isClickable = true
+    importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
 
     context.withStyledAttributes(
       set = attrs,
@@ -163,16 +184,23 @@ class CheckableChipView @JvmOverloads constructor(
           getDimensionOrThrow(R.styleable.CheckableChipView_ccv_outlineCornerRadius)
       }
 
-      checkedColor = getColor(R.styleable.CheckableChipView_android_color, checkedColor)
-      checkedTextColor =
-        getColor(R.styleable.CheckableChipView_ccv_checkedTextColor, Color.TRANSPARENT)
       defaultTextColor = getColorOrThrow(R.styleable.CheckableChipView_android_textColor)
+      checkedColor = getColor(R.styleable.CheckableChipView_android_color, checkedColor)
+      val resolvedCheckedTextColor =
+        getColor(R.styleable.CheckableChipView_ccv_checkedTextColor, defaultTextColor)
+      textColorPair = resolvedCheckedTextColor to defaultTextColor
 
       getString(R.styleable.CheckableChipView_android_text)?.let { text = it }
       textSize =
         getDimension(R.styleable.CheckableChipView_android_textSize, TextView(context).textSize)
 
-      clearDrawable = getDrawableOrThrow(R.styleable.CheckableChipView_ccv_clearIcon).apply {
+      val resolvedClearDrawable =
+        getDrawableOrThrow(R.styleable.CheckableChipView_ccv_clearIcon)
+      clearDrawable = if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.N_MR1) {
+        resolvedClearDrawable.mutate()
+      } else {
+        resolvedClearDrawable
+      }.apply {
         setBounds(
           -intrinsicWidth / 2,
           -intrinsicHeight / 2,
@@ -224,16 +252,20 @@ class CheckableChipView @JvmOverloads constructor(
     }
 
     setMeasuredDimension(width, height)
-    outlineProvider = object : ViewOutlineProvider() {
-      override fun getOutline(view: View, outline: Outline) {
-        outline.setRoundRect(0, 0, width, height, outlineCornerRadius ?: (height / 2f))
-      }
-    }
     touchFeedbackDrawable.setBounds(0, 0, width, height)
+  }
+
+  private val shapePath = Path()
+  private val strokePath = Path()
+  private val shapeMaskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
   }
 
   @CallSuper
   override fun onDraw(canvas: Canvas) {
+    shapePath.setG2Shape(0f, 0f, width.toFloat(), height.toFloat(), outlineCornerRadius ?: (height / 2f))
+    shapePath.fillType = Path.FillType.INVERSE_WINDING
+    val saveCount = canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), null)
     super.onDraw(canvas)
 
     outlinePaint.apply {
@@ -246,20 +278,19 @@ class CheckableChipView @JvmOverloads constructor(
 
     // Outline
     if (progress < 1f) {
-      canvas.drawRoundRect(
+      strokePath.setG2Shape(
         halfStroke,
         halfStroke,
         width - halfStroke,
         height - halfStroke,
-        rounding,
-        rounding,
-        outlinePaint
+        rounding
       )
+      canvas.drawPath(strokePath, outlinePaint)
     }
 
     val isRtl = layoutDirection == LAYOUT_DIRECTION_RTL
 
-    // Draws beyond bounds and relies on clipToOutline to enforce shape
+    // The expanding fill and touch feedback share the antialiased G2 mask.
     val initialIndicatorSize = 8.dp.toFloat()
     val indicatorCenterX = if (isRtl) {
       width - (outlineWidth + padding + padding / 2f + initialIndicatorSize / 2f)
@@ -344,16 +375,23 @@ class CheckableChipView @JvmOverloads constructor(
 
     // Touch feedback
     touchFeedbackDrawable.draw(canvas)
+    canvas.drawPath(shapePath, shapeMaskPaint)
+    canvas.restoreToCount(saveCount)
   }
 
   /**
    * Starts the animation to enable/disable a filter and invokes a function when done.
    */
   fun setCheckedAnimated(checked: Boolean, onEnd: (() -> Unit)?) {
+    if (checked == isChecked) {
+      return
+    }
     targetProgress = if (checked) 1f else 0f
+    onCheckedTargetChangeListener?.invoke(this, checked)
     if (targetProgress != progress) {
       progressAnimator.apply {
         removeAllListeners()
+        removeAllUpdateListeners()
         cancel()
         setFloatValues(progress, targetProgress)
         duration = if (checked) CHECKING_DURATION else UNCHECKING_DURATION
@@ -381,6 +419,16 @@ class CheckableChipView @JvmOverloads constructor(
       playSoundEffect(SoundEffectConstants.CLICK)
     }
     return handled
+  }
+
+  @Suppress("DEPRECATION")
+  override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+    super.onInitializeAccessibilityNodeInfo(info)
+    info.className = CheckBox::class.java.name
+    info.text = text
+    info.isCheckable = true
+    info.isChecked = isChecked
+    info.isClickable = isClickable
   }
 
   override fun isChecked() = targetProgress == 1f

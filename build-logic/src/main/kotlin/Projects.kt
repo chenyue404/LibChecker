@@ -1,24 +1,25 @@
-import com.android.build.gradle.BaseExtension
-import com.android.build.gradle.LibraryExtension
-import com.android.build.gradle.internal.dsl.BaseAppModuleExtension
+import com.android.build.api.dsl.ApplicationExtension
+import com.android.build.api.dsl.CommonExtension
+import com.android.build.api.dsl.LibraryExtension
 import java.io.File
 import org.gradle.api.Project
 
-const val baseVersionName = "2.5.3"
-val Project.verName: String get() = "${baseVersionName}${versionNameSuffix}.${exec("git rev-parse --short=7 HEAD")}"
-val Project.verCode: Int get() = exec("git rev-list --count HEAD").toInt()
-val Project.isDevVersion: Boolean get() = exec("git tag -l $baseVersionName").isEmpty()
-val Project.versionNameSuffix: String get() = if (isDevVersion) ".dev" else ""
+const val baseVersionName = "2.5.5"
 
 fun Project.setupLibraryModule(block: LibraryExtension.() -> Unit = {}) {
   setupBaseModule(block)
 }
 
-fun Project.setupAppModule(block: BaseAppModuleExtension.() -> Unit = {}) {
-  setupBaseModule<BaseAppModuleExtension> {
+fun Project.setupAppModule(block: ApplicationExtension.() -> Unit = {}) {
+  val projectVersion = resolveProjectVersion()
+
+  setupBaseModule<ApplicationExtension> {
     defaultConfig {
-      versionCode = verCode
-      versionName = verName
+      versionCode = projectVersion.code
+      versionName = projectVersion.name
+      minSdk = 24
+      targetSdk = 37
+
       androidResources {
         ignoreAssetsPatterns += "!PublicSuffixDatabase.list" // OkHttp5
         generateLocaleConfig = true
@@ -40,12 +41,13 @@ fun Project.setupAppModule(block: BaseAppModuleExtension.() -> Unit = {}) {
         )
       }
     }
-    val releaseSigning = if (project.hasProperty("releaseStoreFile")) {
+    val releaseStoreFile = providers.gradleProperty("releaseStoreFile")
+    val releaseSigning = if (releaseStoreFile.isPresent) {
       signingConfigs.create("release") {
-        storeFile = File(project.properties["releaseStoreFile"] as String)
-        storePassword = project.properties["releaseStorePassword"] as String
-        keyAlias = project.properties["releaseKeyAlias"] as String
-        keyPassword = project.properties["releaseKeyPassword"] as String
+        storeFile = File(releaseStoreFile.get())
+        storePassword = providers.gradleProperty("releaseStorePassword").get()
+        keyAlias = providers.gradleProperty("releaseKeyAlias").get()
+        keyPassword = providers.gradleProperty("releaseKeyPassword").get()
       }
     } else {
       signingConfigs.getByName("debug")
@@ -57,15 +59,10 @@ fun Project.setupAppModule(block: BaseAppModuleExtension.() -> Unit = {}) {
       release {
         isMinifyEnabled = true
         isShrinkResources = true
-        proguardFiles(
-          getDefaultProguardFile("proguard-android-optimize.txt"),
-          "proguard-rules.pro"
-        )
       }
-      all {
+      configureEach {
         signingConfig = releaseSigning
-        buildConfigField("Boolean", "IS_DEV_VERSION", isDevVersion.toString())
-        //buildConfigField("String", "BUILD_TIME", "\"" + Instant.now().toString() + "\"")
+        buildConfigField("Boolean", "IS_DEV_VERSION", projectVersion.isDev.toString())
       }
     }
 
@@ -73,20 +70,39 @@ fun Project.setupAppModule(block: BaseAppModuleExtension.() -> Unit = {}) {
   }
 }
 
-private inline fun <reified T : BaseExtension> Project.setupBaseModule(crossinline block: T.() -> Unit = {}) {
-  extensions.configure<BaseExtension>("android") {
-    compileSdkVersion(36)
-    defaultConfig {
-      minSdk = 24
-      targetSdk = 36
-    }
+private inline fun <reified T : CommonExtension> Project.setupBaseModule(crossinline block: T.() -> Unit = {}) {
+  extensions.configure<CommonExtension>("android") {
+    compileSdk = 37
+    compileSdkMinor = 0
+
+    // App and compat intentionally keep Java parser and shim sources under src/*/kotlin.
     sourceSets.configureEach {
-      java.srcDirs("src/$name/kotlin")
+      java.directories.add("src/$name/kotlin")
     }
+    includeKotlinToolingMetadataInApk()
     (this as T).block()
   }
 }
 
-fun Project.exec(command: String): String = providers.exec {
-  commandLine(command.split(" "))
+private data class ProjectVersion(
+  val name: String,
+  val code: Int,
+  val isDev: Boolean
+)
+
+private fun Project.resolveProjectVersion(): ProjectVersion {
+  val isDev = exec("git", "tag", "-l", baseVersionName).isEmpty()
+  val suffix = if (isDev) ".dev" else ""
+  val commit = exec("git", "rev-parse", "--short=7", "HEAD")
+  val code = exec("git", "rev-list", "--count", "HEAD").toInt()
+
+  return ProjectVersion(
+    name = "$baseVersionName$suffix.$commit",
+    code = code,
+    isDev = isDev
+  )
+}
+
+private fun Project.exec(vararg command: String): String = providers.exec {
+  commandLine(*command)
 }.standardOutput.asText.get().trim()
